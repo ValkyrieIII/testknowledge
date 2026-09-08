@@ -130,6 +130,23 @@ test("structured facts capture exceptions and multi-line assertions", async () =
   });
 });
 
+test("parametrized parameters are not treated as fixture dependencies", async () => {
+  const text = [
+    "import pytest",
+    "",
+    '@pytest.mark.parametrize("value", [1, 2])',
+    '@pytest.mark.parametrize("a, b", [(1, 2)])',
+    "def test_x(value, a, b, sample_client):",
+    "    assert value > 0",
+  ].join("\n");
+  await withRepo({ "test_param.py": text }, async (repo) => {
+    const evidence = await new PythonPytestAdapter().collect({ path: "test_param.py", type: "test_code", text }, scope(repo));
+    const fn = evidence.find((item) => item.symbol === "test_x");
+    assert.deepEqual(fn?.payload.fixtureRequests, ["sample_client"]);
+    assert.deepEqual(fn?.payload.parameters, [{ name: "value" }, { name: "a" }, { name: "b" }, { name: "sample_client" }]);
+  });
+});
+
 test("evidence ids do not depend on the project revision", async () => {
   await withRepo(SOURCES, async (repo) => {
     const adapter = new PythonPytestAdapter();

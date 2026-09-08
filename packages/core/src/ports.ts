@@ -19,6 +19,14 @@ export type ProjectScope = {
   revision: string;
 };
 
+export type ObservedFacts = {
+  assertions: string[];
+  expectedExceptions: string[];
+  mocks: string[];
+  dependencies: string[];
+  parametrize: string[];
+};
+
 export type KnowledgeDraft = {
   kind: KnowledgeKind;
   title: string;
@@ -30,6 +38,7 @@ export type KnowledgeDraft = {
   path: string;
   symbol: string;
   evidenceIds: string[];
+  observed?: ObservedFacts;
   confidence: number;
 };
 

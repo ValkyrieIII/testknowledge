@@ -24,6 +24,20 @@ function evidenceId(scope: ProjectScope, file: SourceFile, symbol: string, start
   return `ev_${hash(`${scope.repo}:${file.path}:${symbol}:${start}:${contentHash}`).slice(0, 24)}`;
 }
 
+/** Parameter names supplied by `@pytest.mark.parametrize(...)` are test inputs, not fixtures. */
+function parametrizedNames(decorators: Array<{ name: string; literals: unknown[] }>): string[] {
+  return decorators
+    .filter((decorator) => /parametrize/u.test(decorator.name))
+    .flatMap((decorator) => {
+      const first = decorator.literals[0];
+      if (typeof first !== "string") return [];
+      return first
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean);
+    });
+}
+
 async function readPytestConfig(repo: string): Promise<PytestConfig> {
   const sources: Array<{ path: string; text: string }> = [];
   for (const name of CONFIG_FILES) {
@@ -88,6 +102,7 @@ export class PythonPytestAdapter implements SourceAdapter {
       const inTestClass = fn.enclosingClass !== "" && isTestClassName(fn.enclosingClass, config);
       const isFixture = fn.decorators.some((decorator) => isFixtureDecorator(decorator.name));
       const isTest = isTestModule && isTestFunctionName(fn.name, config) && (fn.enclosingClass === "" || inTestClass);
+      const parametrized = new Set(parametrizedNames(fn.decorators));
       const mocks = [...fn.calls, ...fn.decorators].map((item) => item.name).filter(isMockCall);
       add(fn.name, fn.lineStart, fn.lineEnd, {
         isTest,
@@ -103,7 +118,7 @@ export class PythonPytestAdapter implements SourceAdapter {
         calls: fn.calls,
         withBlocks: fn.withBlocks,
         tryHandlers: fn.tryHandlers,
-        fixtureRequests: fn.parameters.map((parameter) => parameter.name),
+        fixtureRequests: fn.parameters.map((parameter) => parameter.name).filter((name) => !parametrized.has(name)),
         mocks: [...new Set(mocks)],
       });
     }

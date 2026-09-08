@@ -39,6 +39,16 @@ export const EvidenceSchema = z.object({
   payload: z.record(z.unknown()),
 });
 
+export const ObservedFactsSchema = z.object({
+  assertions: z.array(z.string()).default([]),
+  expectedExceptions: z.array(z.string()).default([]),
+  mocks: z.array(z.string()).default([]),
+  dependencies: z.array(z.string()).default([]),
+  parametrize: z.array(z.string()).default([]),
+});
+
+const EMPTY_OBSERVED = { assertions: [], expectedExceptions: [], mocks: [], dependencies: [], parametrize: [] };
+
 export const KnowledgeCardSchema = z.object({
   id: z.string().min(1),
   kind: KnowledgeKindSchema,
@@ -53,6 +63,7 @@ export const KnowledgeCardSchema = z.object({
   path: z.string().min(1),
   symbol: z.string().default(""),
   evidenceIds: z.array(z.string().min(1)).min(1),
+  observed: ObservedFactsSchema.default(EMPTY_OBSERVED),
   confidence: z.number().min(0).max(1),
   status: KnowledgeStatusSchema,
   sourceHash: z.string().min(1),
@@ -105,6 +116,7 @@ export const BuildRequestSchema = z.object({
 });
 
 export type Evidence = z.infer<typeof EvidenceSchema>;
+export type ObservedFacts = z.infer<typeof ObservedFactsSchema>;
 export type KnowledgeCard = z.infer<typeof KnowledgeCardSchema>;
 export type ContextRequest = z.infer<typeof ContextRequestSchema>;
 export type ContextPack = z.infer<typeof ContextPackSchema>;

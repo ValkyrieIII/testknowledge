@@ -3,15 +3,23 @@ import { resolve, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { BuildRequestSchema, ContextRequestSchema, ReviewRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine } from "@testknowledge/core";
-import { JsonlRepository, MarkdownAdapter, OpenAiCompatibleCandidateExtractor, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
+import { JsonlRepository, MarkdownAdapter, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
+// import { LlmKnowledgeExtractor } from "@testknowledge/adapters";   // 暂时停用
 
 function engine(): KnowledgeEngine {
   const root = resolve(process.cwd(), ".testknowledge");
-  const baseUrl = process.env.TESTKNOWLEDGE_LLM_BASE_URL;
-  const apiKey = process.env.TESTKNOWLEDGE_LLM_API_KEY;
-  const model = process.env.TESTKNOWLEDGE_LLM_MODEL;
-  const llm = baseUrl && apiKey && model ? new OpenAiCompatibleCandidateExtractor(baseUrl, apiKey, model) : undefined;
-  return new KnowledgeEngine(new JsonlRepository(root), new SqliteBm25fIndex(join(root, "index.sqlite3")), [new PythonPytestAdapter(), new MarkdownAdapter()], new RuleCandidateExtractor(), llm);
+  // LLM 抽取暂时停用；行为级卡片以后再加回来。
+  // const baseUrl = process.env.TESTKNOWLEDGE_LLM_BASE_URL;
+  // const apiKey = process.env.TESTKNOWLEDGE_LLM_API_KEY;
+  // const model = process.env.TESTKNOWLEDGE_LLM_MODEL;
+  // const llm = baseUrl && apiKey && model ? new LlmKnowledgeExtractor({ baseUrl, apiKey, model }) : undefined;
+  return new KnowledgeEngine(
+    new JsonlRepository(root),
+    new SqliteBm25fIndex(join(root, "index.sqlite3")),
+    [new PythonPytestAdapter(), new MarkdownAdapter()],
+    new RuleCandidateExtractor(),
+    // llm,
+  );
 }
 
 const program = new Command().name("testknowledge").description("Evidence-backed test knowledge engine");
@@ -23,9 +31,9 @@ program.command("init").action(async () => {
 program.command("build")
   .requiredOption("--repo <path>")
   .requiredOption("--file <path...>")
-  .option("--llm")
-  .action(async (options: { repo: string; file: string[]; llm?: boolean }) => {
-    const body = BuildRequestSchema.parse({ repo: resolve(options.repo), files: options.file.map((path) => ({ path, type: path.includes("test") ? "test_code" : path.endsWith(".md") ? "project_document" : "production_code" })), useLlm: Boolean(options.llm) });
+  // .option("--llm")   // 暂时停用
+  .action(async (options: { repo: string; file: string[] }) => {
+    const body = BuildRequestSchema.parse({ repo: resolve(options.repo), files: options.file.map((path) => ({ path, type: path.includes("test") ? "test_code" : path.endsWith(".md") ? "project_document" : "production_code" })), useLlm: false /* Boolean(options.llm) */ });
     const files = await KnowledgeEngine.readFiles(body.repo, body.files);
     console.log(JSON.stringify(await engine().build({ repo: body.repo, files, useLlm: body.useLlm }), null, 2));
   });

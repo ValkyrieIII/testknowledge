@@ -153,3 +153,52 @@ test("cards from different repositories do not collide", async () => {
   assert.equal(cards.length, 2);
   assert.notEqual(cards[0]?.id, cards[1]?.id);
 });
+
+test("LLM extraction replaces rule cards when configured", async () => {
+  const repository = new MemoryRepository();
+  let ruleCalls = 0;
+  const rule = {
+    id: "rule",
+    extract: async () => {
+      ruleCalls += 1;
+      return [];
+    },
+  };
+  const llm = {
+    id: "llm",
+    extract: async (evidence) =>
+      evidence.map((item) => ({
+        kind: "behavior",
+        title: `知识 ${item.path}`,
+        statement: `内容：${item.payload.text}`,
+        trigger: "总是",
+        expectedBehavior: "行为",
+        oracle: "断言",
+        risk: "",
+        path: item.path,
+        symbol: item.symbol,
+        evidenceIds: [item.id],
+        confidence: 0.6,
+      })),
+  };
+  const engine = new KnowledgeEngine(repository, noopIndex, [new StubAdapter()], rule, llm);
+  const result = await engine.build({ repo: "/r", files: [fileA("A1")], useLlm: true });
+  assert.equal(ruleCalls, 0);
+  assert.deepEqual(result.extractor, ["llm"]);
+  assert.equal(result.knowledgeCount, 1);
+});
+
+test("falls back to rule cards when the LLM fails", async () => {
+  const repository = new MemoryRepository();
+  const llm = {
+    id: "llm",
+    extract: async () => {
+      throw new Error("boom");
+    },
+  };
+  const engine = new KnowledgeEngine(repository, noopIndex, [new StubAdapter()], new StubExtractor(), llm);
+  const result = await engine.build({ repo: "/r", files: [fileA("A1")], useLlm: true });
+  assert.deepEqual(result.extractor, ["stub-extractor"]);
+  assert.deepEqual(result.warnings, ["llm:failed"]);
+  assert.equal(result.knowledgeCount, 1);
+});

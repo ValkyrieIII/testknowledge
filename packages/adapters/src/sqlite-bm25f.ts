@@ -36,7 +36,7 @@ export class SqliteBm25fIndex implements SearchIndex {
           searchableText(card.path),
           searchableText(card.title),
           searchableText(card.trigger),
-          searchableText(card.statement),
+          searchableText(card.statement, ...(card.observed ? Object.values(card.observed).flat() : [])),
           searchableText(card.expectedBehavior),
           searchableText(card.oracle),
         );

@@ -43,6 +43,7 @@ function cardKey(draft: KnowledgeDraft, repo: string): string {
     risk: draft.risk,
     path: draft.path,
     symbol: draft.symbol,
+    observed: draft.observed ?? null,
   });
 }
 
@@ -67,6 +68,7 @@ function toCard(draft: KnowledgeDraft, scope: ProjectScope, previous?: Knowledge
     path: draft.path,
     symbol: draft.symbol,
     evidenceIds: draft.evidenceIds,
+    observed: draft.observed ?? { assertions: [], expectedExceptions: [], mocks: [], dependencies: [], parametrize: [] },
     confidence: draft.confidence,
     status: previous?.sourceHash === sourceHash ? previous.status : "candidate",
     sourceHash,
@@ -97,20 +99,22 @@ export class KnowledgeEngine {
       if (!adapter) continue;
       evidence.push(...await adapter.collect(file, scope));
     }
-    const drafts = await this.ruleExtractor.extract(evidence, scope);
-    const extractors = [this.ruleExtractor.id];
     const warnings: string[] = [];
-    if (input.useLlm) {
-      if (!this.llmExtractor) {
-        warnings.push("llm:unconfigured");
-      } else {
-        try {
-          drafts.push(...await this.llmExtractor.extract(evidence, scope));
-          extractors.push(this.llmExtractor.id);
-        } catch {
-          warnings.push(`${this.llmExtractor.id}:failed`);
-        }
+    let drafts: KnowledgeDraft[];
+    let extractors: string[];
+    if (input.useLlm && this.llmExtractor) {
+      try {
+        drafts = await this.llmExtractor.extract(evidence, scope);
+        extractors = [this.llmExtractor.id];
+      } catch {
+        warnings.push(`${this.llmExtractor.id}:failed`);
+        drafts = await this.ruleExtractor.extract(evidence, scope);
+        extractors = [this.ruleExtractor.id];
       }
+    } else {
+      if (input.useLlm) warnings.push("llm:unconfigured");
+      drafts = await this.ruleExtractor.extract(evidence, scope);
+      extractors = [this.ruleExtractor.id];
     }
     const previous = await this.repository.readKnowledge();
     const previousById = new Map(previous.map((card) => [card.id, card]));

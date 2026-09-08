@@ -2,21 +2,23 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { join, resolve } from "node:path";
 import { BuildRequestSchema, ContextRequestSchema, ReviewRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine } from "@testknowledge/core";
-import { JsonlRepository, MarkdownAdapter, OpenAiCompatibleCandidateExtractor, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
+import { JsonlRepository, MarkdownAdapter, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
+// import { LlmKnowledgeExtractor } from "@testknowledge/adapters";   // 暂时停用
 
 export function createEngine(dataRoot = resolve(process.cwd(), ".testknowledge")): KnowledgeEngine {
   const repository = new JsonlRepository(dataRoot);
   const ruleExtractor = new RuleCandidateExtractor();
-  const baseUrl = process.env.TESTKNOWLEDGE_LLM_BASE_URL;
-  const apiKey = process.env.TESTKNOWLEDGE_LLM_API_KEY;
-  const model = process.env.TESTKNOWLEDGE_LLM_MODEL;
-  const llmExtractor = baseUrl && apiKey && model ? new OpenAiCompatibleCandidateExtractor(baseUrl, apiKey, model) : undefined;
+  // LLM 抽取暂时停用；行为级卡片以后再加回来。
+  // const baseUrl = process.env.TESTKNOWLEDGE_LLM_BASE_URL;
+  // const apiKey = process.env.TESTKNOWLEDGE_LLM_API_KEY;
+  // const model = process.env.TESTKNOWLEDGE_LLM_MODEL;
+  // const llmExtractor = baseUrl && apiKey && model ? new LlmKnowledgeExtractor({ baseUrl, apiKey, model }) : undefined;
   return new KnowledgeEngine(
     repository,
     new SqliteBm25fIndex(join(dataRoot, "index.sqlite3")),
     [new PythonPytestAdapter(), new MarkdownAdapter()],
     ruleExtractor,
-    llmExtractor,
+    // llmExtractor,
   );
 }
 
