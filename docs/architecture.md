@@ -7,6 +7,27 @@
 
 ---
 
+## 0. 当前状态(截至 commit 7e25280)
+
+**已实现并启用**
+- 证据抽取(语法树,确定性)
+- 证据卡(**测试函数级**):`observed` 结构化事实(断言 / 期望异常 / mock / 依赖 / 参数化)
+- 审核状态机、JSONL 存储、SQLite 检索
+- API / CLI / Web
+
+**已实现但暂时停用**
+- `LlmKnowledgeExtractor`(行为级卡片生成):模块和测试都在,`api` / `cli` 的接线**已注释**
+
+**只有设计、尚未实现**
+- 分组(`EvidenceCluster` / LLM 提议分组)
+- 手法词表(`techniques`)
+- 适用条件(`applicability`)
+- 读定义、迁移、可执行验证
+
+> 下面的图里标了【未实现】的层,**代码里还没有**。别把它们当成现有能力。
+
+---
+
 ## 1. 定位
 
 **做什么**:从项目的测试代码里提炼「测试设计知识」,让 Agent 在写新测试时能复用。
@@ -54,6 +75,8 @@
 - 它的输入是**确定性层产出的证据**,不是原始代码。
 - 它的输出是**候选提议**,必须过确定性校验 + 人审——所以不是「猜」,是「提议」。
 
+> **②④ 目前停用。** LLM 模块已实现,但 `api` / `cli` 未接线;当前默认走确定性规则出卡(**函数级**,不分组)。
+
 ---
 
 ## 4. 分层架构
@@ -64,13 +87,13 @@
 ├──────────────────────────────────────────────────────────────┤
 │ 1 证据抽取      语法树 → 事实（确定性）              【已有】 │
 ├──────────────────────────────────────────────────────────────┤
-│ 2 分组提议      LLM 提议分组 + 确定性校验            【新】   │
+│ 2 分组提议      LLM 提议分组 + 确定性校验            【未实现】│
 ├──────────────────────────────────────────────────────────────┤
-│ 3 知识生成      LLM 写行为描述 + 选手法 + 引用证据   【新】   │
+│ 3 知识生成      LLM 写行为描述 + 引用证据            【停用】  │
 ├──────────────────────────────────────────────────────────────┤
-│ 4 校验          引用存在性 + 不超范围（确定性）      【新】   │
+│ 4 校验          引用存在性（确定性）                 【部分】  │
 ├──────────────────────────────────────────────────────────────┤
-│ 5 知识模型      行为级卡片 + 适用条件 + 出处         【改】   │
+│ 5 知识模型      函数级证据卡 + observed 结构化事实   【已有】 │
 ├──────────────────────────────────────────────────────────────┤
 │ 6 存储检索      JSONL 权威 + SQLite 索引             【已有】 │
 ├──────────────────────────────────────────────────────────────┤
@@ -93,9 +116,9 @@
 payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, calls, ... }
 ```
 
-### 5.2 EvidenceCluster(新)
+### 5.2 EvidenceCluster(未实现)
 
-一组在验证同一行为的证据。
+> **未实现。** 这是「行为级聚合」的载体,随分组方案(8.1)一起暂缓。当前卡片直接对应单个测试函数,没有簇。
 
 ```
 {
@@ -107,35 +130,34 @@ payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, c
 }
 ```
 
-### 5.3 KnowledgeCard(改)
+### 5.3 KnowledgeCard(当前形态)
 
-从「函数级事实卡」改为「行为级知识卡」。
+**函数级证据卡**。`observed` 是结构化事实,`statement` 是它的短句渲染。
 
 ```
 {
-  id,                        // 内容寻址：repo + 语义字段
-  kind,                      // 保留（fixture/mock/behavior/...）
-  statement,                 // 行为描述（LLM 写，引用证据）
-  // techniques: [],         // 设计手法（规范词表，暂不加）
-  oracle,                    // 判据
-  trigger,                   // 什么时候用
-  applicability: {           // 适用条件
-    language, framework, pattern
+  id,                        // 内容寻址：repo + 语义字段 + observed
+  kind,                      // fixture | behavior | assertion | ...
+  title,
+  statement,                 // 短句，如 "断言：result is None；依赖：tmp_path"
+  observed: {                // 结构化事实
+    assertions, expectedExceptions, mocks, dependencies, parametrize
   },
-  evidenceIds: [],           // 指向 EvidenceCluster 的成员
-  status,                    // candidate / verified / rejected / stale
-  validation,                // 以后：可执行验证结果
-  confidence, sourceHash, createdAt, updatedAt
+  oracle, trigger, expectedBehavior, risk,
+  repo, revision, path, symbol,
+  evidenceIds,
+  confidence, status, sourceHash, createdAt, updatedAt
 }
 ```
 
-**粒度**:证据在**测试函数级**,卡片在**行为级**。一张卡引用多条证据。
+**尚未加入**:`applicability`(适用条件)、`techniques`(设计手法)、`validation`(可执行验证)。
+**粒度**:目前是**测试函数级**(一张卡对应一个测试函数);行为级聚合需要分组,见 8.1(**未实现**)。
 
 ---
 
 ## 6. 测试设计手法词表(规范,有限)
 
-> **暂不实现,先记录。** 当前 LLM 只从现有证据生成行为卡,不受词表约束。
+> **暂不实现,先记录。** 当前卡片是函数级证据卡,不涉及手法词表。
 
 手法是有限集合,由人定稿。初版约 15 个:
 
@@ -180,7 +202,11 @@ payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, c
 
 ## 8. 关键机制
 
-### 8.1 分组:LLM 提议 + 确定性校验 + 人审
+### 8.1 分组(未实现)
+
+> **未实现。** 当前不做分组:一张卡对应一个测试函数。
+
+#### 方案:LLM 提议 + 确定性校验 + 人审
 
 **为什么不用纯规则**(已实测):
 
@@ -220,9 +246,11 @@ payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, c
 
 | 阶段 | 内容 | 依赖 LLM |
 |---|---|---|
-| **1** | 项目接入 + 词表 + 卡片 + 界面（不分组，函数级卡片） | ❌ |
-| **2** | LLM 提议分组 + 写知识 + 校验 | ✅ |
+| **1** | 项目接入 + 函数级证据卡 + 界面（**不分组、不接 LLM**） | ❌ |
+| **2** | LLM 提议分组 + 行为级卡片 + 校验（模块已就绪，待启用） | ✅ |
 | **3** | 读定义 / 迁移 / 可执行验证 | 视情况 |
+
+**当前在阶段 1。** 阶段 2 的模块已经写好并测过,但接线已注释停用。
 
 **阶段 1 纯确定性,能独立演示、独立测试。分组从阶段 2 开始(需要 LLM)。**
 
@@ -243,7 +271,7 @@ payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, c
 | 词 | 含义 |
 |---|---|
 | Evidence | 从代码里抄下来的原始事实 + 出处 |
-| 证据簇 | 在验证同一行为的一组证据 |
+| 证据簇 | 在验证同一行为的一组证据(**未实现**) |
 | 手法 | 测试设计技术(边界值、异常路径……),有限词表 |
 | 惯用法 | 框架/团队给代码起的特殊名字(`pytest.raises`、`check_equal`) |
 | 适用条件 | 这张卡在什么语言/框架/场景下成立 |
@@ -261,3 +289,5 @@ payload: { assertions, withBlocks, tryHandlers, decorators, parameters, mocks, c
 | 2026-09-09 | 惯用法识别:语法层 + 框架表;读定义可选;认不出不标 | 不让 LLM 猜 |
 | 2026-09-09 | 阶段 1 不分组,先做函数级卡片 + 手法标签 | 分组需要 LLM,且不是当前瓶颈 |
 | 2026-09-09 | 规范词表暂不引入;LLM 只从现有证据生成行为卡 | 先验证「证据 → 行为卡」这条链路,词表晚一步 |
+| 2026-09-09 | **LLM 抽取暂时停用**(接线注释),默认走确定性规则出卡 | 实测 LLM 只看到派生事实、看不到代码片段 → 瞎补细节(如把「裸 key」说成「空值」);先把证据卡做稳 |
+| 2026-09-09 | 证据卡加 `observed` 结构化事实,`statement` 变短;`kind` 不再误标 `fixture` | 「断言/异常/mock/依赖/参数化」分字段;`fixture` 只给真正的 fixture 定义 |
