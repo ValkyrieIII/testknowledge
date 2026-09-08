@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parser } from "@lezer/python";
 import type { Evidence } from "@testknowledge/model";
 import {
   isConftestPath,
@@ -15,6 +14,7 @@ import {
   type SourceAdapter,
   type SourceFile,
 } from "@testknowledge/core";
+import { extractFunctions, isMockCall } from "./python-facts.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -22,27 +22,6 @@ const CONFIG_FILES = ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"] as
 
 function evidenceId(scope: ProjectScope, file: SourceFile, symbol: string, start: number, contentHash: string): string {
   return `ev_${hash(`${scope.repo}:${file.path}:${symbol}:${start}:${contentHash}`).slice(0, 24)}`;
-}
-
-function lineNumber(text: string, offset: number): number {
-  return text.slice(0, offset).split("\n").length;
-}
-
-/** Parameter names from a function signature, dropping `self` / `cls` / `*args` / `**kwargs`. */
-export function parameterNames(snippet: string): string[] {
-  const signature = /(?:async\s+)?def\s+\w+\s*\(([\s\S]*?)\)\s*(?:->[\s\S]*?)?:/u.exec(snippet)?.[1] ?? "";
-  return signature
-    .split(",")
-    .map((part) => part.trim().split(":")[0]?.split("=")[0]?.trim() ?? "")
-    .filter((name) => /^[A-Za-z_]\w*$/u.test(name) && name !== "self" && name !== "cls");
-}
-
-/** Decorators live on the surrounding `DecoratedStatement`, not on `FunctionDefinition`. */
-function decoratorsFor(file: SourceFile, node: { from: number; parent: { name: string; from: number } | null }): string[] {
-  const parent = node.parent;
-  if (parent?.name !== "DecoratedStatement") return [];
-  const text = file.text.slice(parent.from, node.from);
-  return [...text.matchAll(/@([^\n]+)/gu)].map((match) => match[1]?.trim() ?? "").filter(Boolean);
 }
 
 async function readPytestConfig(repo: string): Promise<PytestConfig> {
@@ -58,7 +37,7 @@ async function readPytestConfig(repo: string): Promise<PytestConfig> {
 }
 
 export class PythonPytestAdapter implements SourceAdapter {
-  readonly id = "source.python-pytest.lezer-v2";
+  readonly id = "source.python-pytest.lezer-v3";
 
   private readonly configCache = new Map<string, PytestConfig>();
 
@@ -79,7 +58,6 @@ export class PythonPytestAdapter implements SourceAdapter {
     const isConftest = isConftestPath(file.path);
     const isTestModule = isTestModulePath(file.path, config);
     const sourceType = isTestModule || isConftest ? "test_code" : file.type;
-    const tree = parser.parse(file.text);
     const lines = file.text.split("\n");
     const result: Evidence[] = [];
     const add = (symbol: string, start: number, end: number, payload: Record<string, unknown>): void => {
@@ -106,48 +84,29 @@ export class PythonPytestAdapter implements SourceAdapter {
       isConftest,
       imports: [...file.text.matchAll(/^(?:from|import)\s+.+$/gim)].map((match) => match[0]),
     });
-    const classStack: string[] = [];
-    const cursor = tree.cursor();
-    const visit = (): void => {
-      const entersClass = cursor.name === "ClassDefinition";
-      if (entersClass) {
-        const classSnippet = file.text.slice(cursor.from, cursor.to);
-        classStack.push(/^\s*class\s+([A-Za-z_]\w*)/u.exec(classSnippet)?.[1] ?? "anonymous");
-      }
-      if (cursor.name === "FunctionDefinition") {
-        const snippet = file.text.slice(cursor.from, cursor.to);
-        const name = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/u.exec(snippet)?.[1] ?? "anonymous";
-        const start = lineNumber(file.text, cursor.from);
-        const end = lineNumber(file.text, cursor.to);
-        const decorators = decoratorsFor(file, cursor.node);
-        const enclosingClass = classStack.at(-1);
-        const inTestClass = enclosingClass !== undefined && isTestClassName(enclosingClass, config);
-        const isFixture = decorators.some(isFixtureDecorator);
-        const isTest = isTestModule && isTestFunctionName(name, config) && (enclosingClass === undefined || inTestClass);
-        const calls = [...snippet.matchAll(/\b([A-Za-z_]\w*)\s*\(/gu)].map((match) => match[1]).filter((value): value is string => Boolean(value));
-        const assertions = [...snippet.matchAll(/\bassert\s+([^\n]+)/gu)].map((match) => match[1]?.trim()).filter((value): value is string => Boolean(value));
-        const mocks = [...snippet.matchAll(/\b(?:patch|Mock|MagicMock)\b[^\n]*/gu)].map((match) => match[0]);
-        add(name, start, end, {
-          isTest,
-          isFixture,
-          isTestModule,
-          isConftest,
-          enclosingClass: enclosingClass ?? "",
-          inTestClass,
-          decorators,
-          calls: [...new Set(calls)],
-          assertions,
-          fixtureRequests: parameterNames(snippet),
-          mocks,
-        });
-      }
-      if (cursor.firstChild()) {
-        do visit(); while (cursor.nextSibling());
-        cursor.parent();
-      }
-      if (entersClass) classStack.pop();
-    };
-    visit();
+    for (const fn of extractFunctions(file.text)) {
+      const inTestClass = fn.enclosingClass !== "" && isTestClassName(fn.enclosingClass, config);
+      const isFixture = fn.decorators.some((decorator) => isFixtureDecorator(decorator.name));
+      const isTest = isTestModule && isTestFunctionName(fn.name, config) && (fn.enclosingClass === "" || inTestClass);
+      const mocks = [...fn.calls, ...fn.decorators].map((item) => item.name).filter(isMockCall);
+      add(fn.name, fn.lineStart, fn.lineEnd, {
+        isTest,
+        isFixture,
+        isTestModule,
+        isConftest,
+        isAsync: fn.isAsync,
+        enclosingClass: fn.enclosingClass,
+        inTestClass,
+        decorators: fn.decorators,
+        parameters: fn.parameters,
+        assertions: fn.assertions,
+        calls: fn.calls,
+        withBlocks: fn.withBlocks,
+        tryHandlers: fn.tryHandlers,
+        fixtureRequests: fn.parameters.map((parameter) => parameter.name),
+        mocks: [...new Set(mocks)],
+      });
+    }
     return result;
   }
 }

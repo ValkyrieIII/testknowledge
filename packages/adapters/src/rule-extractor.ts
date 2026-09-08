@@ -5,6 +5,18 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+/** Assertions are structured facts ({ text, lineStart, lineEnd }); accept plain strings too. */
+function textList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === "string") return [item];
+    if (item !== null && typeof item === "object" && typeof (item as { text?: unknown }).text === "string") {
+      return [(item as { text: string }).text];
+    }
+    return [];
+  });
+}
+
 export class RuleCandidateExtractor implements CandidateExtractor {
   readonly id = "extractor.rules.observed-v2";
 
@@ -17,7 +29,7 @@ export class RuleCandidateExtractor implements CandidateExtractor {
         continue;
       }
       if (payload.isTest !== true) continue;
-      const assertions = stringList(payload.assertions);
+      const assertions = textList(payload.assertions);
       const fixtureRequests = stringList(payload.fixtureRequests);
       const mocks = stringList(payload.mocks);
       if (assertions.length === 0 && fixtureRequests.length === 0 && mocks.length === 0) continue;

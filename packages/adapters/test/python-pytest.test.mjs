@@ -46,7 +46,9 @@ test("default discovery flags conftest fixtures and test functions", async () =>
     assert.equal(fixture.payload.isFixture, true);
     assert.equal(fixture.payload.isTest, false);
     assert.equal(fixture.sourceType, "test_code");
-    assert.deepEqual(fixture.payload.decorators, ["pytest.fixture"]);
+    assert.deepEqual(fixture.payload.decorators, [
+      { name: "pytest.fixture", args: [], literals: [], text: "@pytest.fixture" },
+    ]);
   });
 });
 
@@ -59,7 +61,15 @@ test("default discovery classifies test, class method, and helper", async () => 
     const top = evidence.find((item) => item.symbol === "test_load_config");
     assert.equal(top?.payload.isTest, true);
     assert.deepEqual(top?.payload.fixtureRequests, ["sample_client", "monkeypatch"]);
-    assert.deepEqual(top?.payload.decorators, ["pytest.mark.parametrize('value', [1, 2])"]);
+    assert.deepEqual(top?.payload.decorators, [
+      {
+        name: "pytest.mark.parametrize",
+        args: ["'value'", "[1, 2]"],
+        literals: ["value", [1, 2]],
+        text: "@pytest.mark.parametrize('value', [1, 2])",
+      },
+    ]);
+    assert.deepEqual(top?.payload.assertions, [{ text: "sample_client.ok", lineStart: 5, lineEnd: 5 }]);
 
     const inner = evidence.find((item) => item.symbol === "test_inner");
     assert.equal(inner?.payload.isTest, true);
@@ -92,6 +102,31 @@ test("files outside python_files are not promoted to test modules", async () => 
     assert.equal(fn?.payload.isTestModule, false);
     assert.equal(fn?.payload.isTest, false);
     assert.equal(fn?.sourceType, "production_code");
+  });
+});
+
+test("structured facts capture exceptions and multi-line assertions", async () => {
+  const text = [
+    "def test_boundary(value):",
+    "    with pytest.raises(ValueError, match='bad'):",
+    "        parse(value)",
+    "    try:",
+    "        risky()",
+    "    except (TypeError, KeyError):",
+    "        pass",
+    "    assert parse(",
+    "        value, mode='strict'",
+    "    ) == [1, 2]",
+  ].join("\n");
+  await withRepo({ "test_boundary.py": text }, async (repo) => {
+    const evidence = await new PythonPytestAdapter().collect({ path: "test_boundary.py", type: "test_code", text }, scope(repo));
+    const fn = evidence.find((item) => item.symbol === "test_boundary");
+    assert.deepEqual(fn?.payload.withBlocks, [
+      { call: "pytest.raises", args: ["ValueError", "match='bad'"], literals: ["bad"], lineStart: 2, lineEnd: 2 },
+    ]);
+    assert.deepEqual(fn?.payload.tryHandlers, [{ exceptionTypes: ["TypeError", "KeyError"], lineStart: 6, lineEnd: 6 }]);
+    assert.equal(fn?.payload.assertions.length, 1);
+    assert.equal(fn?.payload.assertions[0].text, "parse(\n        value, mode='strict'\n    ) == [1, 2]");
   });
 });
 
