@@ -1,0 +1,26 @@
+{
+  "name": "testknowledge-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm --filter @testknowledge/model build && pnpm --filter @testknowledge/core build && pnpm --filter @testknowledge/adapters build && pnpm --filter @testknowledge/api build && pnpm --filter @testknowledge/cli build && pnpm --filter @testknowledge/web build",
+    "lint": "eslint apps packages",
+    "test": "pnpm build && pnpm -r --if-present test",
+    "typecheck": "pnpm build && pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "eslint": "^9.35.0",
+    "eslint-plugin-vue": "^10.4.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.42.0",
+    "vite": "^7.1.3",
+    "vue-eslint-parser": "^10.1.1",
+    "vue-tsc": "^3.0.6"
+  }
+}

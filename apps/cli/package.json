@@ -1,0 +1,19 @@
+{
+  "name": "@testknowledge/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "testknowledge": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@testknowledge/adapters": "workspace:*",
+    "@testknowledge/core": "workspace:*",
+    "@testknowledge/model": "workspace:*",
+    "commander": "^14.0.0"
+  }
+}

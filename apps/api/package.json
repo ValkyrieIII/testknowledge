@@ -1,0 +1,16 @@
+{
+  "name": "@testknowledge/api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@testknowledge/adapters": "workspace:*",
+    "@testknowledge/core": "workspace:*",
+    "@testknowledge/model": "workspace:*",
+    "fastify": "^5.4.0"
+  }
+}
