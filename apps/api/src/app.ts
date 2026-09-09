@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { join, resolve } from "node:path";
 import { BuildRequestSchema, ContextRequestSchema, ReviewRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine } from "@testknowledge/core";
+import { PytestProjectScanner } from "@testknowledge/adapters";
 import { JsonlRepository, MarkdownAdapter, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
 // import { LlmKnowledgeExtractor } from "@testknowledge/adapters";   // 暂时停用
 
@@ -24,6 +25,8 @@ export function createEngine(dataRoot = resolve(process.cwd(), ".testknowledge")
 
 export function createApp(engine = createEngine()): FastifyInstance {
   const app = Fastify({ logger: true });
+  const scanner = new PytestProjectScanner();
+  let writing = false;
   app.get("/api/health", async () => ({ status: "ok", version: "0.1.0" }));
   app.get("/api/knowledge", async () => engine.listKnowledge());
   app.get<{ Params: { id: string } }>("/api/knowledge/:id", async (request, reply) => {
@@ -48,19 +51,26 @@ export function createApp(engine = createEngine()): FastifyInstance {
     }
   });
   app.post("/api/build", async (request, reply) => {
+    if (writing) return reply.code(409).send({ error: "构建或审核正在进行，请完成后重试。" });
+    writing = true;
     try {
       const body = BuildRequestSchema.parse(request.body);
-      const files = await KnowledgeEngine.readFiles(body.repo, body.files);
-      return await engine.build({ repo: resolve(body.repo), files, useLlm: body.useLlm });
+      return await engine.buildFromRepository(body, scanner);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Build failed" });
+    } finally {
+      writing = false;
     }
   });
   app.patch<{ Params: { id: string } }>("/api/knowledge/:id", async (request, reply) => {
+    if (writing) return reply.code(409).send({ error: "构建或审核正在进行，请完成后重试。" });
+    writing = true;
     try {
       return await engine.review(request.params.id, ReviewRequestSchema.parse(request.body));
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Review failed" });
+    } finally {
+      writing = false;
     }
   });
   app.get("/api/export/memory", async (_request, reply) => reply.type("text/markdown").send(await engine.exportMemory()));

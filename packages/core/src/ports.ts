@@ -4,6 +4,7 @@ import type {
   KnowledgeCard,
   KnowledgeKind,
   KnowledgeStatus,
+  ScanSummary,
 } from "@testknowledge/model";
 
 export type SourceFile = {
@@ -13,6 +14,13 @@ export type SourceFile = {
 };
 
 export type SourceSpec = Omit<SourceFile, "text">;
+
+export type ProjectScan = { files: SourceSpec[]; summary: ScanSummary };
+export type { ScanSummary } from "@testknowledge/model";
+
+export interface ProjectScanner {
+  scan(repo: string): Promise<ProjectScan>;
+}
 
 export type ProjectScope = {
   repo: string;
@@ -52,6 +60,7 @@ export type ReviewRecord = {
 
 export interface SourceAdapter {
   readonly id: string;
+  prepare?(repo: string): Promise<void>;
   supports(file: SourceFile): boolean;
   collect(file: SourceFile, scope: ProjectScope): Promise<Evidence[]>;
 }

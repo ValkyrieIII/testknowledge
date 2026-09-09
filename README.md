@@ -33,7 +33,7 @@ API 默认监听 `http://127.0.0.1:4173`，前端开发服务器默认监听 `ht
 
 ```text
 .testknowledge/
-├─ config.toml       # 预留的项目扫描配置；当前 build 通过 --file 显式指定来源
+├─ config.toml       # 预留；当前未读取此文件
 ├─ evidence.jsonl    # 确定性来源事实
 ├─ knowledge.jsonl   # 知识卡权威文件
 ├─ reviews.jsonl     # 审核轨迹
@@ -42,3 +42,33 @@ API 默认监听 `http://127.0.0.1:4173`，前端开发服务器默认监听 `ht
 ```
 
 没有适用的已审核知识时，Context Pack 会返回 `ordinary_agent`，不会注入无来源的通用测试建议。
+
+## 自动扫描项目
+
+构建后可只传仓库路径，也可继续显式指定文件：
+
+```powershell
+pnpm --filter @testknowledge/cli start -- build --repo D:/projects/example
+pnpm --filter @testknowledge/cli start -- build --repo D:/projects/example --file tests/test_example.py
+```
+
+Web 输入 API 所在机器上的仓库路径，点击“扫描仓库”；完成后自动刷新卡片。
+API 的 `POST /api/build` 支持 `{"repo":"D:/projects/example"}`；
+旧的 `files: [{path, type}]` 仍可使用，显式空数组不合法。
+
+自动模式递归发现任意层级的 `test/`、`tests/`，读取其中所有 Python 文件、
+这些目录的祖先 `conftest.py` 和根 pytest 配置。函数识别仍使用现有 pytest 命名规则。
+不跟随符号链接，并排除版本控制、依赖、虚拟环境、构建和缓存目录。
+不会自动扫描其他目录中的生产代码或 Markdown；自定义测试目录仍需显式传文件。
+根配置统一适用于所有测试目录；暂不处理嵌套项目独立配置或 pytest 动态收集插件。
+扫描只读取源码，不导入或执行目标项目代码。
+
+结果增加 `scan` 摘要（模式、文件数、测试目录、发现的根配置、警告）。
+`configFiles` 列出发现的配置，并不表示所有配置都被合并；实际选择遵循现有配置解析器。
+`knowledgeCount` 沿用原含义：整个知识库的卡片数，包含其他仓库和过期卡片。
+未发现 Python 来源时返回零文件和警告。每次构建仍按仓库全量更新，
+不再出现的旧卡会标记为 stale；显式文件清单同样是构建范围，不是增量追加。
+扫描或读取失败时不会开始更新知识库。API 构建和审核互斥，冲突请求返回 409。
+
+数据目录仍相对于进程工作目录，使用 pnpm filter 启动时分别位于 CLI/API 包目录；
+如需 CLI 与 API 共享数据，从同一目录直接运行各自的 dist 入口。

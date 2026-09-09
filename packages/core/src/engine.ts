@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
+  BuildRequestSchema,
+  type BuildRequest,
+  type BuildResult,
   ContextRequestSchema,
   type ContextPack,
   type ContextRequest,
@@ -14,6 +18,7 @@ import type {
   KnowledgeDraft,
   KnowledgeRepository,
   ProjectScope,
+  ProjectScanner,
   SearchIndex,
   SourceAdapter,
   SourceFile,
@@ -86,11 +91,23 @@ export class KnowledgeEngine {
     private readonly llmExtractor?: CandidateExtractor,
   ) {}
 
+  async buildFromRepository(raw: BuildRequest, scanner: ProjectScanner): Promise<BuildResult> {
+    const request = BuildRequestSchema.parse(raw);
+    const repo = resolve(request.repo);
+    const scan = request.files
+      ? { files: request.files, summary: { mode: "explicit" as const, fileCount: request.files.length, testDirectories: [], configFiles: [], warnings: [] } }
+      : await scanner.scan(repo);
+    const files = await KnowledgeEngine.readFiles(repo, scan.files);
+    const result = await this.build({ repo, files, useLlm: request.useLlm });
+    return { ...result, scan: scan.summary, warnings: [...scan.summary.warnings, ...result.warnings] };
+  }
+
   async build(input: {
     repo: string;
     files: SourceFile[];
     useLlm: boolean;
-  }): Promise<{ repo: string; revision: string; evidenceCount: number; knowledgeCount: number; extractor: string[]; warnings: string[] }> {
+  }): Promise<BuildResult> {
+    for (const adapter of this.sourceAdapters) await adapter.prepare?.(input.repo);
     const revision = digest(input.files.map((file) => `${file.path}:${digest(file.text)}`).sort().join("\n"));
     const scope: ProjectScope = { repo: input.repo, revision };
     const evidence: Evidence[] = [];

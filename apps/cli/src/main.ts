@@ -3,6 +3,7 @@ import { resolve, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { BuildRequestSchema, ContextRequestSchema, ReviewRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine } from "@testknowledge/core";
+import { PytestProjectScanner } from "@testknowledge/adapters";
 import { JsonlRepository, MarkdownAdapter, PythonPytestAdapter, RuleCandidateExtractor, SqliteBm25fIndex } from "@testknowledge/adapters";
 // import { LlmKnowledgeExtractor } from "@testknowledge/adapters";   // 暂时停用
 
@@ -30,12 +31,11 @@ program.command("init").action(async () => {
 
 program.command("build")
   .requiredOption("--repo <path>")
-  .requiredOption("--file <path...>")
+  .option("--file <path...>", "explicit source files; omit to scan test/tests directories")
   // .option("--llm")   // 暂时停用
-  .action(async (options: { repo: string; file: string[] }) => {
-    const body = BuildRequestSchema.parse({ repo: resolve(options.repo), files: options.file.map((path) => ({ path, type: path.includes("test") ? "test_code" : path.endsWith(".md") ? "project_document" : "production_code" })), useLlm: false /* Boolean(options.llm) */ });
-    const files = await KnowledgeEngine.readFiles(body.repo, body.files);
-    console.log(JSON.stringify(await engine().build({ repo: body.repo, files, useLlm: body.useLlm }), null, 2));
+  .action(async (options: { repo: string; file?: string[] }) => {
+    const body = BuildRequestSchema.parse({ repo: resolve(options.repo), files: options.file?.map((path) => ({ path, type: path.includes("test") ? "test_code" : path.endsWith(".md") ? "project_document" : "production_code" })), useLlm: false /* Boolean(options.llm) */ });
+    console.log(JSON.stringify(await engine().buildFromRepository(body, new PytestProjectScanner()), null, 2));
   });
 
 program.command("query")

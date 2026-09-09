@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Evidence } from "@testknowledge/model";
 import {
@@ -42,9 +42,13 @@ async function readPytestConfig(repo: string): Promise<PytestConfig> {
   const sources: Array<{ path: string; text: string }> = [];
   for (const name of CONFIG_FILES) {
     try {
+      const info = await lstat(join(repo, name));
+      if (!info.isFile() || info.isSymbolicLink()) continue;
       sources.push({ path: name, text: await readFile(join(repo, name), "utf8") });
-    } catch {
-      // A missing config file is the normal case.
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`无法读取 pytest 配置 ${join(repo, name)}`, { cause });
+      }
     }
   }
   return resolvePytestConfig(sources);
@@ -54,6 +58,10 @@ export class PythonPytestAdapter implements SourceAdapter {
   readonly id = "source.python-pytest.lezer-v3";
 
   private readonly configCache = new Map<string, PytestConfig>();
+
+  async prepare(repo: string): Promise<void> {
+    this.configCache.set(repo, await readPytestConfig(repo));
+  }
 
   supports(file: SourceFile): boolean {
     return file.type === "test_code" || file.type === "production_code" || file.path.endsWith(".py");

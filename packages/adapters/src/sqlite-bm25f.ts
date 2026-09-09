@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { KnowledgeCard } from "@testknowledge/model";
@@ -54,6 +54,12 @@ export class SqliteBm25fIndex implements SearchIndex {
     includeCandidates: boolean;
     limit: number;
   }): Promise<RetrievalHit[]> {
+    try {
+      await stat(this.path);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw cause;
+    }
     const db = new DatabaseSync(this.path);
     try {
       this.ensureSchema(db);

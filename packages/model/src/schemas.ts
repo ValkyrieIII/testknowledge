@@ -111,9 +111,27 @@ export const BuildRequestSchema = z.object({
       path: z.string().min(1),
       type: EvidenceTypeSchema,
     }),
-  ).min(1),
+  ).min(1).optional(),
   useLlm: z.boolean().default(false),
 });
+
+export type ScanSummary = {
+  mode: "auto" | "explicit";
+  fileCount: number;
+  testDirectories: string[];
+  configFiles: string[];
+  warnings: string[];
+};
+
+export type BuildResult = {
+  repo: string;
+  revision: string;
+  evidenceCount: number;
+  knowledgeCount: number;
+  extractor: string[];
+  warnings: string[];
+  scan?: ScanSummary;
+};
 
 export type Evidence = z.infer<typeof EvidenceSchema>;
 export type ObservedFacts = z.infer<typeof ObservedFactsSchema>;
