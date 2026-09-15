@@ -1,10 +1,20 @@
 import type {
   Evidence,
+  EvidenceCluster,
   EvidenceType,
   KnowledgeCard,
+  KnowledgeChange,
   KnowledgeKind,
   KnowledgeStatus,
+  KnowledgeRelation,
+  TestTechnique,
+  Applicability,
   ScanSummary,
+  ContextRequest,
+  EvaluationPlan,
+  EvaluationObservation,
+  ProjectMap,
+  ObservedFacts,
 } from "@testknowledge/model";
 
 export type SourceFile = {
@@ -27,14 +37,6 @@ export type ProjectScope = {
   revision: string;
 };
 
-export type ObservedFacts = {
-  assertions: string[];
-  expectedExceptions: string[];
-  mocks: string[];
-  dependencies: string[];
-  parametrize: string[];
-};
-
 export type KnowledgeDraft = {
   kind: KnowledgeKind;
   title: string;
@@ -45,14 +47,35 @@ export type KnowledgeDraft = {
   risk: string;
   path: string;
   symbol: string;
+  targetSymbols?: string[];
+  partitions?: string[];
+  preconditions?: string[];
+  dependencies?: string[];
+  techniques?: TestTechnique[];
+  applicability?: Applicability;
   evidenceIds: string[];
   observed?: ObservedFacts;
   confidence: number;
+  clusterId?: string;
+  clusterEvidenceIds?: string[];
+  clusterSubject?: string;
+  clusterShape?: string;
 };
+
+export type EvidenceClusterDraft = Pick<EvidenceCluster, "subject" | "shape" | "evidenceIds" | "confidence" | "extractor">;
+export type CandidateExtractionResult = KnowledgeDraft[] | { drafts: KnowledgeDraft[]; clusters: EvidenceClusterDraft[] };
 
 export type ReviewRecord = {
   knowledgeId: string;
-  status: Extract<KnowledgeStatus, "verified" | "rejected">;
+  status: Extract<KnowledgeStatus, "reviewed" | "verified" | "rejected">;
+  reviewer: string;
+  note: string;
+  createdAt: string;
+};
+
+export type ClusterReviewRecord = {
+  clusterId: string;
+  status: "reviewed" | "rejected";
   reviewer: string;
   note: string;
   createdAt: string;
@@ -65,16 +88,43 @@ export interface SourceAdapter {
   collect(file: SourceFile, scope: ProjectScope): Promise<Evidence[]>;
 }
 
+export interface ProjectEvidenceProvider {
+  readonly id: string;
+  collect(scope: ProjectScope): Promise<Evidence[]>;
+}
+
 export interface CandidateExtractor {
   readonly id: string;
-  extract(evidence: Evidence[], scope: ProjectScope): Promise<KnowledgeDraft[]>;
+  extract(evidence: Evidence[], scope: ProjectScope): Promise<CandidateExtractionResult>;
+}
+
+export type StructuralContext = {
+  relatedPaths: string[];
+  targetSymbols: string[];
+  source: "codegraph";
+  warnings: string[];
+};
+
+export interface StructuralContextProvider {
+  analyze(request: ContextRequest): Promise<StructuralContext>;
 }
 
 export interface KnowledgeRepository {
   readEvidence(): Promise<Evidence[]>;
   readKnowledge(): Promise<KnowledgeCard[]>;
-  writeBuild(evidence: Evidence[], cards: KnowledgeCard[]): Promise<void>;
+  readClusters?(): Promise<EvidenceCluster[]>;
+  readRelations?(): Promise<KnowledgeRelation[]>;
+  readKnowledgeChanges?(): Promise<KnowledgeChange[]>;
+  writeBuild(evidence: Evidence[], cards: KnowledgeCard[], relations?: KnowledgeRelation[], clusters?: EvidenceCluster[]): Promise<void>;
   appendReview(record: ReviewRecord): Promise<void>;
+  appendClusterReview?(record: ClusterReviewRecord): Promise<void>;
+  appendKnowledgeChanges?(records: KnowledgeChange[]): Promise<void>;
+  readEvaluationPlans?(): Promise<EvaluationPlan[]>;
+  writeEvaluationPlans?(plans: EvaluationPlan[]): Promise<void>;
+  readEvaluationObservations?(): Promise<EvaluationObservation[]>;
+  appendEvaluationObservation?(observation: EvaluationObservation): Promise<void>;
+  readProjectMaps?(): Promise<ProjectMap[]>;
+  writeProjectMaps?(maps: ProjectMap[]): Promise<void>;
 }
 
 export type RetrievalHit = {
