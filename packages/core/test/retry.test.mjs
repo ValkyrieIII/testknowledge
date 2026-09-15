@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LlmTruncationError, isRetryable, withBackoff } from "../dist/index.js";
+import { LlmResponseFormatError, LlmTruncationError, isRetryable, withBackoff } from "../dist/index.js";
 
 test("a retryable failure is retried with backoff and can succeed", async () => {
   const slept = [];
@@ -38,7 +38,9 @@ test("retry classification separates transient from terminal", () => {
   assert.equal(isRetryable(new Error("LLM request failed: 400")), false);
   assert.equal(isRetryable(new Error("LLM request failed: 422")), false);
   assert.equal(isRetryable(new TypeError("fetch failed")), true);
-  assert.equal(isRetryable(new LlmTruncationError("cut off")), false, "truncation is handled by bisecting, not retrying");
+  assert.equal(isRetryable(new LlmTruncationError("cut off mid-answer", true)), false, "that case is bisected, not retried");
+  assert.equal(isRetryable(new LlmTruncationError("cut off before any output", false)), true, "that case needs more room, so retrying it can succeed");
+  assert.equal(isRetryable(new LlmResponseFormatError("gateway returned an HTML page")), true, "a gateway error page is transient");
 });
 
 test("attempts are exhausted when the failure never clears", async () => {

@@ -175,6 +175,145 @@ test("a single-evidence shard propagates truncation rather than bisecting foreve
   assert.equal(calls, 1);
 });
 
+test("a truncation that produced no text is not bisected", async () => {
+  let calls = 0;
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    fetch: async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) };
+    },
+  });
+
+  await assert.rejects(instance.extractShard(SHARD, EVIDENCE, scope), /cut off/u);
+  assert.equal(calls, 1, "splitting cannot help when the budget was spent before any output — a reasoning model's hidden tokens");
+});
+
+test("bisection keeps the half that did succeed", async () => {
+  let calls = 0;
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    fetch: async () => {
+      calls += 1;
+      if (calls === 2) {
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ cards: [{ ...CARD, evidenceIds: ["ev_1"] }] }) }, finish_reason: "stop" }] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{\"cards\":[" }, finish_reason: "length" }] }) };
+    },
+  });
+
+  const result = await instance.extractShard(SHARD, EVIDENCE, scope);
+  assert.equal(calls, 3, "one truncated call plus one call per half");
+  assert.equal(result.drafts.length, 1, "the successful half must not be discarded because its sibling failed");
+  assert.deepEqual(result.drafts[0]?.evidenceIds, ["ev_1"]);
+});
+
+test("a singular toolCall is recognised as a read request", async () => {
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ toolCall: { tool: "read", target: "src/one.py" } }) }, finish_reason: "stop" }] }),
+    }),
+  });
+
+  const step = await instance.step([]);
+  assert.deepEqual(step.toolCalls, [{ tool: "read", target: "src/one.py" }], "mistaking this for a final answer ends the loop and silently yields nothing");
+  assert.equal(step.content, undefined);
+});
+
+test("an answer carrying neither cards nor clusters fails loudly", async () => {
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ note: "nothing to report" }) }, finish_reason: "stop" }] }),
+    }),
+  });
+
+  await assert.rejects(instance.extractShard(SHARD, EVIDENCE, scope), /neither cards nor clusters/u);
+});
+
+test("a gateway error page is not mistaken for a truncated answer", async () => {
+  let calls = 0;
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    fetch: async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "<html><body>502 Bad Gateway</body></html>" }, finish_reason: "stop" }] }) };
+    },
+  });
+
+  await assert.rejects(instance.extractShard(SHARD, EVIDENCE, scope), /was not JSON/u);
+  assert.equal(calls, 1, "a non-JSON body must not be bisected: splitting pays for the same failure twice");
+});
+
+test("an agentic run is cached together with what it read", async () => {
+  const store = new Map();
+  let calls = 0;
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    cache: { get: async (key) => store.get(key), set: async (key, value) => { store.set(key, value); } },
+    fetch: async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ cards: [CARD] }) }, finish_reason: "stop" }] }) };
+    },
+  });
+
+  const run = { content: JSON.stringify({ cards: [CARD] }), readLog: [{ tool: "read", target: "src/one.py", contentHash: "h", evidenceId: "ev_tool" }], evidence: [] };
+  await instance.saveRun(SHARD, EVIDENCE, run);
+
+  assert.deepEqual(await instance.loadRun(SHARD, EVIDENCE), run, "the read log survives the round trip");
+  assert.equal(calls, 0, "a replay must not call the model");
+});
+
+test("the agentic run cache key ignores what the model chose to read", async () => {
+  const keys = [];
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    cache: { get: async (key) => { keys.push(key); return undefined; }, set: async () => {} },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }) }),
+  });
+
+  await instance.loadRun(SHARD, EVIDENCE);
+  await instance.loadRun(SHARD, EVIDENCE);
+  assert.equal(keys[0], keys[1], "the same shard and evidence must produce the same key");
+  assert.equal(typeof keys[0], "string");
+});
+
+test("a change in how evidence is summarised misses the cache", async () => {
+  const keys = [];
+  const instance = new LlmKnowledgeExtractor({
+    baseUrl: "http://example.test/v1/",
+    apiKey: "key",
+    model: "model",
+    cache: { get: async (key) => { keys.push(key); return undefined; }, set: async () => {} },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }) }),
+  });
+
+  // Same evidence ids and same source file hash, different published content — exactly the shape
+  // of an adapter fix that leaves the underlying file untouched.
+  await instance.loadRun(SHARD, EVIDENCE);
+  await instance.loadRun(SHARD, [{ ...EVIDENCE[0], content: "summarised differently" }, EVIDENCE[1]]);
+  assert.notEqual(keys[0], keys[1], "keying on the source hash alone would replay a stale answer after an adapter change");
+});
+
 test("per-kind prompts differ while keeping the shared grounding invariants", () => {
   const behavior = systemPromptFor("behavior");
   const environment = systemPromptFor("environment");

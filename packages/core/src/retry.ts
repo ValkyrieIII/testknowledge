@@ -1,14 +1,42 @@
-/** Raised when a model response is cut off by the output budget, so callers can bisect instead of retrying blind. */
+/**
+ * Raised when a model response is cut off by the output budget.
+ *
+ * `contentPresent` separates two cases that need opposite responses. A response that produced
+ * text before running out can be bisected, because half the input fits. A response that produced
+ * nothing burned the whole budget elsewhere — a reasoning model spending it on hidden thinking —
+ * and splitting the shard only pays that cost twice.
+ */
 export class LlmTruncationError extends Error {
-  constructor(message: string) {
+  readonly contentPresent: boolean;
+
+  constructor(message: string, contentPresent = true) {
     super(message);
     this.name = "LlmTruncationError";
+    this.contentPresent = contentPresent;
+  }
+}
+
+/**
+ * The endpoint answered with something that is not JSON at all.
+ *
+ * A gateway or proxy error page arrives with a success status, so it looks like a model reply
+ * until it is parsed. It is transient and worth retrying, and it must never be mistaken for a
+ * truncated answer: bisecting would split the shard and pay for the same failure again.
+ */
+export class LlmResponseFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LlmResponseFormatError";
   }
 }
 
 /** A transport or capacity failure worth retrying. Terminal errors (bad request, auth, unknown route) are not. */
 export function isRetryable(error: unknown): boolean {
-  if (error instanceof LlmTruncationError) return false;
+  // A response cut off *before* writing anything ran out of allowance, not input: retrying with
+  // more room can succeed. One cut off mid-answer is an input-size problem and is bisected
+  // instead, so it must not be retried unchanged.
+  if (error instanceof LlmTruncationError) return !error.contentPresent;
+  if (error instanceof LlmResponseFormatError) return true;
   if (error instanceof TypeError) return true;
   const message = error instanceof Error ? error.message : String(error);
   if (/timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up/iu.test(message)) return true;

@@ -16,6 +16,33 @@ import type { CandidateExtractor, ExtractionShard, ShardedCandidateExtractor } f
 /** Input ceiling per shard. Keeps a shard inside a normal context window with room for the response. */
 export const MAX_SHARD_INPUT_TOKENS = 24000;
 
+/**
+ * Item ceiling per shard, independent of the token budget.
+ *
+ * Groups are named by the first path segment, so one top-level directory can swallow an entire
+ * repository. Measured on the real project, that turned 160 unrelated production files into a
+ * single `behavior:backend` group, which the token budget then sliced into seven shapeless
+ * chunks of 17–30 items — every one of which failed. A token budget alone cannot prevent that.
+ */
+export const MAX_SHARD_ITEMS = 10;
+
+/**
+ * Whether an evidence item can support test knowledge at all.
+ *
+ * Production code is collected as evidence because the relation layer matches test calls to
+ * production symbols — it is the ground for `COVERS`, not a source of test-design knowledge. The
+ * rule extractor always drew this line (`payload.isTest !== true` was skipped); extraction now
+ * draws it too, so an unrelated implementation file never becomes part of a prompt.
+ */
+export function supportsKnowledge(item: Evidence): boolean {
+  const payload = item.payload ?? {};
+  // Test code is knowledge ground by its type, however finely the adapter split it.
+  if (item.sourceType === "test_code") return true;
+  if (item.sourceType === "issue" || item.sourceType === "bug_history" || item.sourceType === "test_configuration") return true;
+  // A fixture or lifecycle hook can live outside a test module and still be reusable knowledge.
+  return payload.isTest === true || payload.isFixture === true || payload.isSetup === true;
+}
+
 /** Character allowance per evidence item, by the kind of knowledge that item can support. */
 const EXCERPT_CHARS: Record<KnowledgeKind, number> = {
   fixture: 2000,
@@ -40,9 +67,20 @@ const OUTPUT_BASE: Record<KnowledgeKind, number> = {
   environment: 1200,
 };
 
-const OUTPUT_PER_ITEM = 140;
-const OUTPUT_MIN = 600;
-const OUTPUT_MAX = 4000;
+const OUTPUT_PER_ITEM = 250;
+
+/**
+ * Floor, ceiling, and escalation for a shard's output budget.
+ *
+ * The budget is a ceiling, not a charge, so a generous floor costs nothing for a shard that
+ * finishes early. It matters because a model's hidden reasoning is drawn from the same budget:
+ * measured on the real repository, a 29-item shard consumed the whole allowance at both 4000 and
+ * 8000 without emitting a single character of JSON, while 16000 finished and produced 12 cards.
+ * Reasoning appetite therefore grows with the shard, which is why `escalateOutputBudget` exists —
+ * no fixed allowance can be assumed sufficient.
+ */
+const OUTPUT_FLOOR = 8000;
+const OUTPUT_CEILING = 24000;
 
 /** Approximate token count. Deliberately conservative; this is a guard, not an accounting figure. */
 export function estimateTokens(text: string): number {
@@ -54,8 +92,18 @@ export function excerptLimit(kind: KnowledgeKind): number {
 }
 
 export function outputBudget(kind: KnowledgeKind, itemCount: number): number {
-  const raw = OUTPUT_BASE[kind] + OUTPUT_PER_ITEM * itemCount;
-  return Math.max(OUTPUT_MIN, Math.min(OUTPUT_MAX, raw));
+  const raw = OUTPUT_BASE[kind] + OUTPUT_PER_ITEM * Math.max(0, itemCount);
+  return Math.max(OUTPUT_FLOOR, Math.min(OUTPUT_CEILING, raw));
+}
+
+/**
+ * A larger allowance for a retry that ran out of budget before producing anything.
+ *
+ * Splitting the shard cannot help there: less input does not shrink the reasoning the model does
+ * before it starts writing. More room can.
+ */
+export function escalateOutputBudget(current: number): number {
+  return Math.min(current * 2, OUTPUT_CEILING * 4);
 }
 
 /**
@@ -116,6 +164,7 @@ function makeShard(repo: string, kind: KnowledgeKind, subject: string, items: Ev
 export function planExtractionShards(evidence: Evidence[], options: { repo: string }): ExtractionShard[] {
   const groups = new Map<string, Evidence[]>();
   for (const item of evidence) {
+    if (!supportsKnowledge(item)) continue;
     const key = `${kindOfEvidence(item)}\u0000${subjectOf(item)}`;
     groups.set(key, [...(groups.get(key) ?? []), item]);
   }
@@ -124,21 +173,26 @@ export function planExtractionShards(evidence: Evidence[], options: { repo: stri
   for (const key of [...groups.keys()].sort()) {
     const [kind, subject] = key.split("\u0000") as [KnowledgeKind, string];
     const items = [...(groups.get(key) ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+    // Split a group into chunks, then number them. Without the number every chunk of one group
+    // shares a subject, so their ledger rows collapse onto one key and a failing chunk is
+    // overwritten by a succeeding sibling.
+    const chunks: Evidence[][] = [];
     let current: Evidence[] = [];
     let currentTokens = 0;
-    const flush = (): void => {
-      if (current.length === 0) return;
-      shards.push(makeShard(options.repo, kind, subject, current));
-      current = [];
-      currentTokens = 0;
-    };
     for (const item of items) {
       const cost = itemCost(item, kind);
-      if (current.length > 0 && currentTokens + cost > MAX_SHARD_INPUT_TOKENS) flush();
+      if (current.length > 0 && (currentTokens + cost > MAX_SHARD_INPUT_TOKENS || current.length >= MAX_SHARD_ITEMS)) {
+        chunks.push(current);
+        current = [];
+        currentTokens = 0;
+      }
       current.push(item);
       currentTokens += cost;
     }
-    flush();
+    if (current.length > 0) chunks.push(current);
+    chunks.forEach((chunk, index) => {
+      shards.push(makeShard(options.repo, kind, chunks.length === 1 ? subject : `${subject}#${index + 1}`, chunk));
+    });
   }
   return shards;
 }

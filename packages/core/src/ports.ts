@@ -161,6 +161,18 @@ export type AgenticMessage = { role: string; content: string };
 export type AgenticStepResult = { toolCalls?: ToolRead[]; content?: string };
 
 /**
+ * A finished tool-using run, cached so a re-run can restore the reads as well as the answer.
+ *
+ * Caching only the answer would be a trap: the read log feeds the build revision, so a replay
+ * with no reads would land on a different revision than the run it came from.
+ */
+export type CachedAgenticRun = {
+  content: string;
+  readLog: ReadLogEntry[];
+  evidence: Evidence[];
+};
+
+/**
  * A sharded extractor that can also use repository tools.
  *
  * The engine owns the loop and the read log, so a model-directed build stays auditable; the
@@ -170,6 +182,9 @@ export interface AgenticShardExtractor extends ShardedCandidateExtractor {
   beginShard(shard: ExtractionShard, evidence: Evidence[]): AgenticMessage[];
   step(messages: AgenticMessage[]): Promise<AgenticStepResult>;
   finishShard(shard: ExtractionShard, evidence: Evidence[], content: string): CandidateExtractionResult;
+  /** Replays a cached run for this shard, including what it read. */
+  loadRun?(shard: ExtractionShard, evidence: Evidence[]): Promise<CachedAgenticRun | undefined>;
+  saveRun?(shard: ExtractionShard, evidence: Evidence[], run: CachedAgenticRun): Promise<void>;
 }
 
 export function isAgenticShardExtractor(extractor: CandidateExtractor): extractor is AgenticShardExtractor {

@@ -52,17 +52,19 @@ export class TestEnvironmentAdapter implements SourceAdapter {
     const documented = documentedRunInstructions(lines);
     const documentedCommands = documented.map((instruction) => instruction.commandText);
     const runCommands = unique([...documentedCommands, ...profiles.defaultCommands]);
-    const workingDirectories = unique(lines.flatMap((line) => {
-      const match = /^\s*(?:working-directory|workdir)\s*[:=]\s*["']?([^"'#\s]+)/iu.exec(line);
-      return match?.[1] ? [match[1]] : [];
-    }));
+    // A directory is only ever published attached to the step that declares it, via
+    // `runInstructions`. Scanning `working-directory:` across the whole file would produce a bare
+    // list of directories that the source never associated with anything — and any reader, human
+    // or model, will pair that list with the adjacent command list and invent a working
+    // directory for a test command. That is exactly how a CI command came to be documented as
+    // running from `frontend`.
     const serviceImages = unique(lines.flatMap((line) => {
       const match = /^\s*image\s*:\s*["']?([^"'#\s]+)/iu.exec(line);
       return match?.[1] ? [match[1]] : [];
     }));
     const defaultInstructions = profiles.defaultCommands.filter((commandText) => !documentedCommands.includes(commandText)).map((commandText) => ({ commandText }));
     const runInstructions = [...documented, ...defaultInstructions];
-    const summary = { runCommands, runInstructions, workingDirectories, environmentVariableNames: envNames, serviceImages };
+    const summary = { runCommands, runInstructions, environmentVariableNames: envNames, serviceImages };
     const contentHash = hash(file.text);
     return [{
       id: `ev_${hash(`${scope.repo}:${file.path}:${contentHash}`).slice(0, 24)}`,

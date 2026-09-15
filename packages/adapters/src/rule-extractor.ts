@@ -81,17 +81,13 @@ export class RuleCandidateExtractor implements CandidateExtractor {
       if (item.sourceType === "test_configuration" && payload.environmentProfile !== null && typeof payload.environmentProfile === "object") {
         const profile = payload.environmentProfile as Record<string, unknown>;
         const commands = stringList(profile.runCommands);
-        const workingDirectories = stringList(profile.workingDirectories);
         const runInstructions = runInstructionTexts(profile);
         const envNames = stringList(profile.environmentVariableNames);
         const serviceImages = stringList(profile.serviceImages);
-        if (runInstructions.length + commands.length + workingDirectories.length + envNames.length + serviceImages.length > 0) {
+        if (runInstructions.length + commands.length + envNames.length + serviceImages.length > 0) {
           const environmentStatement = runInstructions.length > 0
             ? `运行指令：${runInstructions.join("；")}`
-            : [
-              commands.length ? `命令（未配对）：${commands.join("；")}` : "",
-              workingDirectories.length ? `工作目录（未配对）：${workingDirectories.join("、")}` : "",
-            ].filter(Boolean).join("；");
+            : [commands.length ? `命令（未配对）：${commands.join("；")}` : ""].filter(Boolean).join("；");
           drafts.push({
             kind: "environment",
             title: `${item.path} 的测试环境约束`,

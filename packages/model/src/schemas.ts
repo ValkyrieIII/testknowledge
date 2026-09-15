@@ -340,7 +340,6 @@ export const ContextPackSchema = z.object({
   environmentProfiles: z.array(z.object({
     sourceRef: z.string(),
     runCommands: z.array(z.string()),
-    workingDirectories: z.array(z.string()),
     environmentVariableNames: z.array(z.string()),
     serviceImages: z.array(z.string()),
   })),

@@ -4,10 +4,12 @@ import {
   bisectShard,
   excerptLimit,
   kindOfEvidence,
+  LlmResponseFormatError,
   LlmTruncationError,
   type AgenticMessage,
   type AgenticShardExtractor,
   type AgenticStepResult,
+  type CachedAgenticRun,
   type CandidateExtractionResult,
   type EvidenceClusterDraft,
   type ExtractionShard,
@@ -62,15 +64,18 @@ function parseToolRequest(content: string): ToolRead[] | null {
     return null;
   }
   if (parsed === null || typeof parsed !== "object") return null;
-  const raw = (parsed as { toolCalls?: unknown }).toolCalls;
-  if (!Array.isArray(raw)) return null;
+  const record = parsed as Record<string, unknown>;
+  // The protocol asks for a `toolCalls` array, but a model may answer with a single `toolCall`
+  // object. Recognise both: mistaking a read request for a final answer ends the loop and
+  // silently reports an empty shard.
+  const raw = Array.isArray(record.toolCalls) ? record.toolCalls : record.toolCall !== undefined ? [record.toolCall] : [];
   const calls = raw.flatMap((entry): ToolRead[] => {
     if (entry === null || typeof entry !== "object") return [];
-    const record = entry as Record<string, unknown>;
-    if (record.tool !== "read" && record.tool !== "glob" && record.tool !== "grep" && record.tool !== "list_dir") return [];
-    if (typeof record.target !== "string" || record.target.trim() === "") return [];
-    const options = record.options !== null && typeof record.options === "object" ? record.options as ToolRead["options"] : undefined;
-    return [{ tool: record.tool, target: record.target, ...(options ? { options } : {}) }];
+    const call = entry as Record<string, unknown>;
+    if (call.tool !== "read" && call.tool !== "glob" && call.tool !== "grep" && call.tool !== "list_dir") return [];
+    if (typeof call.target !== "string" || call.target.trim() === "") return [];
+    const options = call.options !== null && typeof call.options === "object" ? call.options as ToolRead["options"] : undefined;
+    return [{ tool: call.tool, target: call.target, ...(options ? { options } : {}) }];
   });
   return calls.length > 0 ? calls : null;
 }
@@ -128,7 +133,7 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
   readonly id = "extractor.llm.behavior-v2";
 
   private readonly fetchImpl: FetchLike;
-  private readonly stepTokens = AGENTIC_STEP_TOKENS;
+  private activeStepTokens = AGENTIC_STEP_TOKENS;
 
   constructor(private readonly config: LlmKnowledgeConfig) {
     this.fetchImpl = config.fetch ?? fetch;
@@ -139,6 +144,10 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
    * read the repository before it answers. Everything it reads comes back as evidence.
    */
   beginShard(shard: ExtractionShard, evidence: Evidence[]): AgenticMessage[] {
+    // The last turn produces the answer, so it gets the shard's own budget rather than a small
+    // fixed cap: a reasoning model spends part of that budget before emitting any JSON.
+    // Shards are driven sequentially, so tracking the active budget on the instance is safe.
+    this.activeStepTokens = shard.maxOutputTokens;
     const messages = this.buildMessages(evidence, shard.kind);
     const system = messages[0];
     if (system) system.content = `${system.content} ${TOOL_PROTOCOL}`;
@@ -146,13 +155,56 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
   }
 
   async step(messages: AgenticMessage[]): Promise<AgenticStepResult> {
-    const content = await this.call(messages, this.stepTokens, undefined);
+    const content = await this.call(messages, this.activeStepTokens, undefined);
     const request = parseToolRequest(content);
     return request === null ? { content } : { toolCalls: request };
   }
 
   finishShard(_shard: ExtractionShard, evidence: Evidence[], content: string): CandidateExtractionResult {
     return this.toResult(this.parse(content), evidence);
+  }
+
+  /**
+   * Replay a completed tool-using run for this shard.
+   *
+   * The read log is cached alongside the answer on purpose. The log feeds the build revision, so
+   * restoring only the answer would land a replayed build on a different revision than the run
+   * it came from.
+   */
+  async loadRun(shard: ExtractionShard, evidence: Evidence[]): Promise<CachedAgenticRun | undefined> {
+    const cached = await this.config.cache?.get(this.runCacheKey(shard, evidence));
+    if (cached === undefined) return undefined;
+    try {
+      const parsed = JSON.parse(cached) as Partial<CachedAgenticRun>;
+      if (typeof parsed.content !== "string" || !Array.isArray(parsed.readLog) || !Array.isArray(parsed.evidence)) return undefined;
+      return { content: parsed.content, readLog: parsed.readLog, evidence: parsed.evidence };
+    } catch {
+      return undefined;
+    }
+  }
+
+  async saveRun(shard: ExtractionShard, evidence: Evidence[], run: CachedAgenticRun): Promise<void> {
+    await this.config.cache?.set(this.runCacheKey(shard, evidence), JSON.stringify(run));
+  }
+
+  /**
+   * Keyed on the exact prompt the model is shown, and never on what the model chose to read.
+   *
+   * Using the source file's hash instead would miss a change in how an adapter *summarises*
+   * evidence: the file is unchanged, the question is different, and a stale answer would be
+   * replayed. Keying on the prompt covers both, while still excluding the read log — the prompt
+   * is the opening state, before any read happened.
+   */
+  private runCacheKey(shard: ExtractionShard, evidence: Evidence[]): string {
+    return createHash("sha256").update(JSON.stringify({
+      extractor: this.id,
+      endpoint: this.config.baseUrl.replace(/\/$/u, ""),
+      model: this.config.model,
+      temperature: 0,
+      purpose: "agentic-run",
+      shard: { id: shard.id, kind: shard.kind, subject: shard.subject },
+      prompt: this.buildMessages(evidence, shard.kind),
+    })).digest("hex");
   }
 
   /**
@@ -192,12 +244,23 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
     try {
       return await this.callShard(shard, evidence, scope, signal, promptKind);
     } catch (error) {
-      if (!(error instanceof LlmTruncationError) || depth > 0 || evidence.length < 2) throw error;
-      const halves = bisectShard(shard, evidence);
+      // Only a response that produced text is worth bisecting: then half the input genuinely fits.
+      // A response that produced nothing spent the budget elsewhere — a reasoning model's hidden
+      // tokens — and splitting the shard would pay that same cost twice for the same nothing.
+      const bisectable = error instanceof LlmTruncationError && error.contentPresent;
+      if (!bisectable || depth > 0 || evidence.length < 2) throw error;
       const results: CandidateExtractionResult[] = [];
-      for (const half of halves) {
-        results.push(...[await this.runShard(half.shard, half.evidence, scope, signal, promptKind, depth + 1)]);
+      const failures: unknown[] = [];
+      for (const half of bisectShard(shard, evidence)) {
+        try {
+          results.push(await this.runShard(half.shard, half.evidence, scope, signal, promptKind, depth + 1));
+        } catch (halfError) {
+          failures.push(halfError);
+        }
       }
+      // Keep whatever the halves did produce. Throwing away a sibling's cards because the other
+      // half failed would discard work that no ledger row accounts for.
+      if (failures.length > 0 && results.length === 0) throw failures[0];
       return mergeResults(results);
     }
   }
@@ -295,22 +358,44 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
     if (!response.ok) throw new Error(`LLM request failed: ${response.status}`);
     const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const choice = body.choices?.[0] as { message?: { content?: string }; finish_reason?: string } | undefined;
-    if (choice?.finish_reason === "length") throw new LlmTruncationError("LLM response was cut off by the output budget");
     const content = choice?.message?.content;
+    if (choice?.finish_reason === "length") {
+      // Distinguish "ran out mid-answer" from "spent the whole budget before producing anything".
+      // Only the first can be fixed by sending less input.
+      throw new LlmTruncationError("LLM response was cut off by the output budget", (content ?? "").trim().length > 0);
+    }
     if (!content) throw new Error("LLM response did not contain content");
     return content;
   }
 
   private parse(content: string): { clusters: RawCard[]; cards: RawCard[] } {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(content) as { clusters?: unknown; cards?: unknown };
-      const objects = (value: unknown): RawCard[] => Array.isArray(value) ? value.filter((item): item is RawCard => item !== null && typeof item === "object" && !Array.isArray(item)) : [];
-      return { clusters: objects(parsed.clusters), cards: objects(parsed.cards) };
+      parsed = JSON.parse(content);
     } catch (error) {
-      // A truncated response is invalid JSON. Report it as truncation so the caller can bisect
-      // instead of retrying the identical oversized request.
-      throw error instanceof SyntaxError ? new LlmTruncationError(`LLM response was not valid JSON: ${error.message}`) : error;
+      if (!(error instanceof SyntaxError)) throw error;
+      // A body that never looked like JSON is a gateway or proxy answer, not a truncated one.
+      // Retry it as a transport failure; bisecting would pay for the same failure twice.
+      const trimmed = content.trim();
+      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+        throw new LlmResponseFormatError(`LLM response was not JSON: ${trimmed.slice(0, 120)}`);
+      }
+      // A truncated response is invalid JSON. Report it as truncation so the caller can decide
+      // between sending less input and asking for more room.
+      throw new LlmTruncationError(`LLM response was not valid JSON: ${error.message}`);
     }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new LlmResponseFormatError(`LLM response was not an object: ${content.trim().slice(0, 120)}`);
+    }
+    const record = parsed as { clusters?: unknown; cards?: unknown };
+    // A JSON object carrying neither key is not an extraction result — most often a tool request
+    // in a shape that was not recognised. Failing loudly beats reporting a shard that produced
+    // nothing while the ledger calls it a success.
+    if (!("cards" in record) && !("clusters" in record)) {
+      throw new LlmResponseFormatError(`LLM response carried neither cards nor clusters: ${content.trim().slice(0, 120)}`);
+    }
+    const objects = (value: unknown): RawCard[] => Array.isArray(value) ? value.filter((item): item is RawCard => item !== null && typeof item === "object" && !Array.isArray(item)) : [];
+    return { clusters: objects(record.clusters), cards: objects(record.cards) };
   }
 
   private toDraft(card: RawCard, byId: Map<string, Evidence>, clusterEvidenceIds?: string[], clusterSubject?: string, clusterShape?: string): KnowledgeDraft[] {

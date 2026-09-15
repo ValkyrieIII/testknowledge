@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_SHARD_INPUT_TOKENS, kindOfEvidence, outputBudget, planExtractionShards } from "../dist/index.js";
+import { MAX_SHARD_INPUT_TOKENS, MAX_SHARD_ITEMS, escalateOutputBudget, kindOfEvidence, outputBudget, planExtractionShards, supportsKnowledge } from "../dist/index.js";
 
 function item(overrides) {
   return {
@@ -68,11 +68,55 @@ test("a group larger than the input ceiling is split", () => {
   }
 });
 
-test("output budget follows the work a shard was given", () => {
-  assert.equal(outputBudget("behavior", 1), 1740);
-  assert.equal(outputBudget("behavior", 100), 4000, "the budget is capped");
-  assert.equal(outputBudget("fixture", 0), 800);
-  assert.equal(outputBudget("historical_bug", -50), 600, "the budget has a floor");
+test("evidence that cannot support knowledge never reaches a shard", () => {
+  // Production code is collected so COVERS can point at production symbols. It is not knowledge.
+  const evidence = [
+    item({ id: "ev_test", payload: { isTest: true, assertions: [{ text: "a" }] } }),
+    item({ id: "ev_prod", sourceType: "production_code", path: "backend/bot/routes.py", symbol: "register_routes", payload: { isTest: false } }),
+    item({ id: "ev_file", sourceType: "production_code", path: "backend/bot/__init__.py", payload: {} }),
+  ];
+
+  assert.equal(supportsKnowledge(evidence[0]), true);
+  assert.equal(supportsKnowledge(evidence[1]), false);
+  assert.equal(supportsKnowledge(evidence[2]), false);
+  assert.deepEqual(planExtractionShards(evidence, { repo: "/repo" }).flatMap((shard) => shard.evidenceIds), ["ev_test"]);
+});
+
+test("no shard grows past the item ceiling", () => {
+  // A token budget alone let one top-level directory become a single 160-file group, which was
+  // then sliced into 30-item chunks of unrelated files. Every one of those failed.
+  const evidence = Array.from({ length: 35 }, (_, index) => item({ id: `ev_${index}`, path: "tests/one.py", payload: { isTest: true, assertions: [{ text: "a" }] } }));
+  const shards = planExtractionShards(evidence, { repo: "/repo" });
+
+  assert.ok(shards.length >= 4, "35 items must not fit in one shard");
+  for (const shard of shards) assert.ok(shard.evidenceIds.length <= MAX_SHARD_ITEMS);
+  assert.deepEqual(shards.flatMap((shard) => shard.evidenceIds).sort(), evidence.map((entry) => entry.id).sort());
+});
+
+test("chunks of one group get distinct labels so their ledger rows stay separate", () => {
+  const evidence = Array.from({ length: 25 }, (_, index) => item({ id: `ev_${index}`, path: "tests/one.py", payload: { isTest: true, assertions: [{ text: "a" }] } }));
+  const shards = planExtractionShards(evidence, { repo: "/repo" });
+
+  const subjects = shards.map((shard) => shard.subject);
+  assert.deepEqual(subjects, ["tests#1", "tests#2", "tests#3"]);
+  assert.equal(new Set(subjects).size, subjects.length, "without distinct labels a failing chunk is overwritten by a succeeding sibling");
+  assert.equal(new Set(shards.map((shard) => shard.id)).size, shards.length);
+});
+
+test("output budget leaves room for a model that reasons before answering", () => {
+  // The budget is a ceiling, not a charge, so a generous floor costs nothing for a shard that
+  // finishes early. Measured on the real repository, a 29-item shard burned the whole allowance
+  // at both 4000 and 8000 on hidden reasoning and emitted nothing.
+  assert.equal(outputBudget("fixture", 0), 8000);
+  assert.equal(outputBudget("behavior", 1), 8000);
+  assert.equal(outputBudget("behavior", 100), 24000, "the budget is capped");
+  assert.equal(outputBudget("historical_bug", -50), 8000, "a negative count still gets the floor");
+});
+
+test("a budget exhausted before any output is escalated, not split", () => {
+  // Splitting cannot help: less input does not mean less thinking. More room can.
+  assert.equal(escalateOutputBudget(8000), 16000);
+  assert.equal(escalateOutputBudget(24000), 48000, "escalation outgrows the normal ceiling");
 });
 
 test("per-shard output budget is attached to the shard", () => {

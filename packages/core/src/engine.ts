@@ -73,7 +73,7 @@ import type {
 import { isAgenticShardExtractor } from "./ports.js";
 import { runAgenticExtraction } from "./agentic-extraction.js";
 import { documentedRunInstructions } from "./run-instructions.js";
-import { isShardedExtractor, planExtractionShards } from "./extraction-shards.js";
+import { isShardedExtractor, planExtractionShards, escalateOutputBudget, supportsKnowledge } from "./extraction-shards.js";
 import { materializeObservations } from "./observations.js";
 import { withBackoff } from "./retry.js";
 
@@ -863,19 +863,31 @@ export class KnowledgeEngine {
           return item ? [item] : [];
         });
         try {
-          const result = await withBackoff(async () => {
+          const result = await withBackoff(async (attempt) => {
+            // A shard that ran out of budget before writing anything needs more room, not less
+            // input: the retry doubles its allowance. The caller's bisection covers the other
+            // truncation case, where text was produced and less input genuinely fits.
+            const active = attempt === 1 ? shard : { ...shard, maxOutputTokens: escalateOutputBudget(shard.maxOutputTokens) };
             const agentic = agenticExtractor;
-            if (agentic === undefined || runtime === undefined) return await extractor.extractShard(shard, shardEvidence, scope);
+            if (agentic === undefined || runtime === undefined) return await extractor.extractShard(active, shardEvidence, scope);
+            const replay = await agentic.loadRun?.(active, shardEvidence);
+            if (replay !== undefined) {
+              discovered.push(...replay.evidence);
+              readLog.push(...replay.readLog);
+              return agentic.finishShard(active, [...shardEvidence, ...replay.evidence], replay.content);
+            }
             const run = await runAgenticExtraction({
               runtime,
               step: (messages) => agentic.step(messages),
               scope,
-              messages: agentic.beginShard(shard, shardEvidence),
+              messages: agentic.beginShard(active, shardEvidence),
             });
             discovered.push(...run.evidence);
             readLog.push(...run.readLog);
-            return agentic.finishShard(shard, [...shardEvidence, ...run.evidence], run.content);
-          });
+            // Cache the reads with the answer, so a replay reproduces the same revision.
+            await agentic.saveRun?.(active, shardEvidence, { content: run.content, readLog: run.readLog, evidence: run.evidence });
+            return agentic.finishShard(active, [...shardEvidence, ...run.evidence], run.content);
+          }, { maxAttempts: 2 });
           const parts = extractionParts(result);
           drafts.push(...parts.drafts);
           clusters.push(...parts.clusters);
@@ -971,26 +983,29 @@ export class KnowledgeEngine {
     let extractors: string[];
     const toolEvidence: Evidence[] = [];
     const readLog: ReadLogEntry[] = [];
+    // Production evidence grounds the COVERS relations; it is not a source of test knowledge.
+    // Extraction only ever sees evidence that can support a claim.
+    const extractionEvidence = evidence.filter(supportsKnowledge);
     if (input.useLlm && this.llmExtractor) {
       const llm = this.llmExtractor;
       try {
         if (isShardedExtractor(llm)) {
-          const sharded = await this.extractSharded(llm, evidence, scope, runBase);
+          const sharded = await this.extractSharded(llm, extractionEvidence, scope, runBase);
           extraction = sharded.extraction;
           toolEvidence.push(...sharded.evidence);
           readLog.push(...sharded.readLog);
         } else {
-          extraction = await this.traced("knowledge_extraction", { ...runBase, extractor: llm.id }, async () => llm.extract(evidence, scope), extractionCounts);
+          extraction = await this.traced("knowledge_extraction", { ...runBase, extractor: llm.id }, async () => llm.extract(extractionEvidence, scope), extractionCounts);
         }
         extractors = [llm.id];
       } catch {
         warnings.push(`${llm.id}:failed`);
-        extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(evidence, scope), extractionCounts);
+        extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(extractionEvidence, scope), extractionCounts);
         extractors = [this.ruleExtractor.id];
       }
     } else {
       if (input.useLlm) warnings.push("llm:unconfigured");
-      extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(evidence, scope), extractionCounts);
+      extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(extractionEvidence, scope), extractionCounts);
       extractors = [this.ruleExtractor.id];
     }
     // The model chose what to read, so this build is no longer determined by the repository
@@ -1280,7 +1295,7 @@ export class KnowledgeEngine {
       if (raw === null || typeof raw !== "object") return [];
       const profile = raw as Record<string, unknown>;
       const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-      return [{ sourceRef: item.sourceRef, runCommands: strings(profile.runCommands), workingDirectories: strings(profile.workingDirectories), environmentVariableNames: strings(profile.environmentVariableNames), serviceImages: strings(profile.serviceImages) }];
+      return [{ sourceRef: item.sourceRef, runCommands: strings(profile.runCommands), environmentVariableNames: strings(profile.environmentVariableNames), serviceImages: strings(profile.serviceImages) }];
     });
     if (knowledge.every((card) => card.kind !== "historical_bug") && historicalRegressionEvidence.length === 0) abstentions.push("no_supported_historical_regression");
     if (runInstructions.length === 0) abstentions.push("no_evidence_backed_run_instruction");
