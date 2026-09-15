@@ -93,6 +93,7 @@ test("observed facts are structured separately from the statement", async () => 
     assertions: ["result is None"],
     expectedExceptions: ["ValueError"],
     mocks: ["patch"],
+    factories: [],
     dependencies: ["tmp_path"],
     parametrize: [],
   });

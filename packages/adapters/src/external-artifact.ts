@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ExecutionDetailsSchema, type Evidence, type ExecutionDetails } from "@testknowledge/model";
-import type { ProjectScope, SourceAdapter, SourceFile } from "@testknowledge/core";
+import { evidenceId, type ProjectScope, type SourceAdapter, type SourceFile } from "@testknowledge/core";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -96,10 +96,6 @@ function records(raw: string): JsonRecord[] {
     if (Array.isArray(nested)) return nested.filter(isRecord);
   }
   return [parsed];
-}
-
-function evidenceId(repo: string, sourceRef: string, contentHash: string): string {
-  return `ev_${hash(`${repo}:${sourceRef}:${contentHash}`).slice(0, 24)}`;
 }
 
 /** Imports explicit, repository-local snapshots. It never contacts trackers or executes test commands. */

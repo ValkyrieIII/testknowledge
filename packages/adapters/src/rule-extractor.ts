@@ -1,42 +1,13 @@
 import type { Evidence, TestTechnique } from "@testknowledge/model";
 import type { CandidateExtractor, KnowledgeDraft, ProjectScope } from "@testknowledge/core";
-import { runInstructionTexts } from "@testknowledge/core";
+import { observedFactsOf, runInstructionTexts } from "@testknowledge/core";
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-/** Assertions are structured facts ({ text, lineStart, lineEnd }); accept plain strings too. */
-function textList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (typeof item === "string") return [item];
-    if (item !== null && typeof item === "object" && typeof (item as { text?: unknown }).text === "string") {
-      return [(item as { text: string }).text];
-    }
-    return [];
-  });
-}
-
 function factList(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object") : [];
-}
-
-/** Exception types the test expects: `with pytest.raises(E)` and `try/except E`. */
-function exceptionExpectations(payload: Record<string, unknown>): string[] {
-  const fromWith = factList(payload.withBlocks)
-    .filter((item) => typeof item.call === "string" && /raises/u.test(item.call))
-    .flatMap((item) => stringList(item.args).filter((arg) => /^[A-Za-z_][\w.]*$/u.test(arg)));
-  const fromTry = factList(payload.tryHandlers).flatMap((item) => stringList(item.exceptionTypes));
-  return [...new Set([...fromWith, ...fromTry, ...stringList(payload.expectedExceptions)])];
-}
-
-/** Raw decorator text for parametrised tests, so the input values stay visible. */
-function parametrizeTexts(payload: Record<string, unknown>): string[] {
-  return [...new Set([...factList(payload.decorators)
-    .filter((item) => typeof item.name === "string" && /parametrize/u.test(item.name))
-    .map((item) => (typeof item.text === "string" ? item.text : ""))
-    .filter(Boolean), ...stringList(payload.parametrize)])];
 }
 
 function applicabilityFor(item: Evidence): { languages: string[]; frameworks: string[]; paths: string[]; symbols: string[]; revision: string } {
@@ -151,12 +122,9 @@ export class RuleCandidateExtractor implements CandidateExtractor {
       }
       if (payload.isTest !== true) continue;
 
-      const assertions = textList(payload.assertions);
-      const fixtureRequests = stringList(payload.fixtureRequests);
-      const mocks = stringList(payload.mocks);
-      const factories = stringList(payload.factories);
-      const exceptions = exceptionExpectations(payload);
-      const parametrize = parametrizeTexts(payload);
+      const facts = observedFactsOf(payload);
+      const { assertions, expectedExceptions: exceptions, mocks, factories, parametrize } = facts;
+      const fixtureRequests = facts.dependencies;
       const techniques = techniquesFor(payload, assertions, fixtureRequests, mocks, exceptions, parametrize);
       if (
         assertions.length === 0 &&
@@ -194,7 +162,7 @@ export class RuleCandidateExtractor implements CandidateExtractor {
         techniques,
         applicability: applicabilityFor(item),
         evidenceIds: [item.id],
-        observed: { assertions, expectedExceptions: exceptions, mocks, factories, dependencies: fixtureRequests, parametrize },
+        observed: facts,
         confidence: 0.4,
       });
     }

@@ -13,6 +13,8 @@ import type {
   ContextRequest,
   EvaluationPlan,
   EvaluationObservation,
+  ExecutionRun,
+  RunItem,
   ProjectMap,
   ObservedFacts,
 } from "@testknowledge/model";
@@ -98,6 +100,25 @@ export interface CandidateExtractor {
   extract(evidence: Evidence[], scope: ProjectScope): Promise<CandidateExtractionResult>;
 }
 
+/** One unit of extraction work: a bounded slice of evidence plus the budget it may spend. */
+export type ExtractionShard = {
+  id: string;
+  kind: KnowledgeKind;
+  subject: string;
+  evidenceIds: string[];
+  maxOutputTokens: number;
+  estimatedInputTokens: number;
+};
+
+/**
+ * An extractor that can be driven one shard at a time. Sharded extractors receive only the
+ * evidence in the shard and a kind-specific instruction set, so one oversized prompt can no
+ * longer crowd out the rest of the repository.
+ */
+export interface ShardedCandidateExtractor extends CandidateExtractor {
+  extractShard(shard: ExtractionShard, evidence: Evidence[], scope: ProjectScope, signal?: AbortSignal): Promise<CandidateExtractionResult>;
+}
+
 export type StructuralContext = {
   relatedPaths: string[];
   targetSymbols: string[];
@@ -107,6 +128,53 @@ export type StructuralContext = {
 
 export interface StructuralContextProvider {
   analyze(request: ContextRequest): Promise<StructuralContext>;
+}
+
+/** A repository read the model asked for. */
+export type ToolRead = {
+  tool: "read" | "glob" | "grep" | "list_dir";
+  target: string;
+  options?: { limit?: number; pattern?: string };
+};
+
+/** One captured read, recorded so a model-directed build stays reproducible. */
+export type ReadLogEntry = {
+  tool: ToolRead["tool"];
+  target: string;
+  contentHash: string;
+  evidenceId: string;
+};
+
+/**
+ * Turns a tool request into evidence.
+ *
+ * `ProjectEvidenceProvider` takes no input channel, so a tool result had nowhere to go. This
+ * port is that channel: every read returns Evidence records, which is what lets a model-chosen
+ * read still be cited and verified like any other fact.
+ */
+export interface EvidenceToolRuntime {
+  readonly id: string;
+  read(tool: ToolRead, scope: ProjectScope): Promise<Evidence[]>;
+}
+
+export type AgenticMessage = { role: string; content: string };
+export type AgenticStepResult = { toolCalls?: ToolRead[]; content?: string };
+
+/**
+ * A sharded extractor that can also use repository tools.
+ *
+ * The engine owns the loop and the read log, so a model-directed build stays auditable; the
+ * extractor only renders the opening prompt, takes one step, and parses the final answer.
+ */
+export interface AgenticShardExtractor extends ShardedCandidateExtractor {
+  beginShard(shard: ExtractionShard, evidence: Evidence[]): AgenticMessage[];
+  step(messages: AgenticMessage[]): Promise<AgenticStepResult>;
+  finishShard(shard: ExtractionShard, evidence: Evidence[], content: string): CandidateExtractionResult;
+}
+
+export function isAgenticShardExtractor(extractor: CandidateExtractor): extractor is AgenticShardExtractor {
+  const candidate = extractor as Partial<AgenticShardExtractor>;
+  return typeof candidate.beginShard === "function" && typeof candidate.step === "function" && typeof candidate.finishShard === "function";
 }
 
 export interface KnowledgeRepository {
@@ -123,6 +191,10 @@ export interface KnowledgeRepository {
   writeEvaluationPlans?(plans: EvaluationPlan[]): Promise<void>;
   readEvaluationObservations?(): Promise<EvaluationObservation[]>;
   appendEvaluationObservation?(observation: EvaluationObservation): Promise<void>;
+  readRuns?(): Promise<ExecutionRun[]>;
+  appendRun?(record: ExecutionRun): Promise<void>;
+  readRunItems?(runId?: string): Promise<RunItem[]>;
+  appendRunItems?(records: RunItem[]): Promise<void>;
   readProjectMaps?(): Promise<ProjectMap[]>;
   writeProjectMaps?(maps: ProjectMap[]): Promise<void>;
 }

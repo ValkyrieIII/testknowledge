@@ -2,6 +2,7 @@ import { join } from "node:path";
 import {
   KnowledgeEngine,
   type CandidateExtractor,
+  type EvidenceToolRuntime,
   type KnowledgeRepository,
   type ProjectEvidenceProvider,
   type SearchIndex,
@@ -9,6 +10,7 @@ import {
   type StructuralContextProvider,
 } from "@testknowledge/core";
 import { CodeGraphCliStructuralProvider } from "./codegraph-structural.js";
+import { RepoEvidenceToolRuntime } from "./evidence-tools.js";
 import { ConversationAdapter } from "./conversation.js";
 import { resolveDataRoot } from "./data-root.js";
 import { ExternalArtifactAdapter } from "./external-artifact.js";
@@ -32,6 +34,7 @@ export type DefaultEngineOptions = {
   ruleExtractor?: CandidateExtractor;
   llmExtractor?: CandidateExtractor | null;
   structuralContextProvider?: StructuralContextProvider | null;
+  evidenceToolRuntime?: EvidenceToolRuntime | null;
   projectEvidenceProviders?: ProjectEvidenceProvider[];
 };
 
@@ -71,5 +74,8 @@ export function createDefaultEngine(options: DefaultEngineOptions = {}): Knowled
     options.llmExtractor === null ? undefined : options.llmExtractor ?? configuredLlm,
     options.structuralContextProvider === null ? undefined : options.structuralContextProvider ?? new CodeGraphCliStructuralProvider(),
     options.projectEvidenceProviders ?? [new GitHistoryEvidenceProvider()],
+    // Repository reads are only useful to a model-directed extractor, so the runtime follows the
+    // extractor: without credentials nothing is exposed and the build stays repository-determined.
+    options.evidenceToolRuntime === null ? undefined : options.evidenceToolRuntime ?? (configuredLlm ? new RepoEvidenceToolRuntime() : undefined),
   );
 }

@@ -27,6 +27,7 @@ import {
   type EvaluationVariant,
   type EvaluationVariantSummary,
   ExecutionDetailsSchema,
+  type ExecutionRun,
   FeedbackRequestSchema,
   type FeedbackRequest,
   type KnowledgeCard,
@@ -43,6 +44,10 @@ import {
   type RecordEvaluationObservationRequest,
   ResolveConflictRequestSchema,
   type ResolveConflictRequest,
+  type RunDisposition,
+  type RunErrorCode,
+  type RunItem,
+  type RunStage,
   VerificationRequestSchema,
   type VerificationRequest,
 } from "@testknowledge/model";
@@ -50,21 +55,32 @@ import type {
   CandidateExtractor,
   CandidateExtractionResult,
   EvidenceClusterDraft,
+  EvidenceToolRuntime,
   KnowledgeDraft,
   KnowledgeRepository,
   ProjectScope,
   ProjectScanner,
   ProjectEvidenceProvider,
+  ReadLogEntry,
   SearchIndex,
   ScanSummary,
   SourceAdapter,
   SourceFile,
   SourceSpec,
+  ShardedCandidateExtractor,
   StructuralContextProvider,
 } from "./ports.js";
+import { isAgenticShardExtractor } from "./ports.js";
+import { runAgenticExtraction } from "./agentic-extraction.js";
 import { documentedRunInstructions } from "./run-instructions.js";
+import { isShardedExtractor, planExtractionShards } from "./extraction-shards.js";
+import { materializeObservations } from "./observations.js";
+import { withBackoff } from "./retry.js";
 
 const isoNow = (): string => new Date().toISOString();
+
+/** The scan stage runs before file contents are read, so no content revision exists yet. */
+const PRESCAN_REVISION = "unscanned";
 
 function isOutside(root: string, target: string): boolean {
   const fromRoot = relative(root, target);
@@ -73,6 +89,48 @@ function isOutside(root: string, target: string): boolean {
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/** Item-level entry a stage can report while it runs. Persisted with the stage record, never one write per item. */
+export type RunTraceEntry = {
+  itemKey: string;
+  itemKind: RunItem["itemKind"];
+  disposition: RunDisposition;
+  durationMs?: number;
+  errorCode?: RunErrorCode | null;
+  errorMessage?: string;
+};
+
+/** Handed to each traced stage so it can report per-item outcomes before the stage record is written. */
+export type RunTrace = {
+  runId: string;
+  addItem(entry: RunTraceEntry): void;
+};
+
+function executionRunId(repo: string, revision: string, stage: RunStage, extractor: string, startedAt: string): string {
+  return `run_${digest(`${repo}:${revision}:${stage}:${extractor}:${startedAt}`).slice(0, 24)}`;
+}
+
+function runItemRecordId(runId: string, itemKind: string, itemKey: string): string {
+  return `ritem_${digest(`${runId}:${itemKind}:${itemKey}`).slice(0, 24)}`;
+}
+
+function runErrorMessage(error: unknown): string {
+  if (error === undefined) return "";
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 1000);
+}
+
+/** Classification is a diagnostic hint for the ledger, not a control-flow input. */
+function runErrorCode(error: unknown): RunErrorCode {
+  if (error instanceof SyntaxError) return "parse";
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return "timeout";
+  const message = runErrorMessage(error);
+  if (/truncat/iu.test(message)) return "parse";
+  if (/timed?\s*out|timeout/iu.test(message)) return "timeout";
+  const status = /\b([45]\d{2})\b/u.exec(message);
+  if (status) return Number(status[1]) < 500 ? "http_4xx" : "http_5xx";
+  return "unknown";
 }
 
 function observedIdentity(observed: KnowledgeDraft["observed"]): Record<string, string[]> | null {
@@ -278,6 +336,11 @@ function extractionParts(result: CandidateExtractionResult): { drafts: Knowledge
   return Array.isArray(result) ? { drafts: result, clusters: [] } : result;
 }
 
+function extractionCounts(result: CandidateExtractionResult): Record<string, number> {
+  const parts = extractionParts(result);
+  return { drafts: parts.drafts.length, clusters: parts.clusters.length };
+}
+
 function explicitGroundingAnchors(draft: KnowledgeDraft): string[] {
   const prose = [draft.statement, draft.trigger, draft.expectedBehavior, draft.oracle].join("\n");
   const quoted = [...prose.matchAll(/`([^`]{2,})`|["“「]([^"”」]{2,})["”」]/gu)].map((match) => match[1] ?? match[2] ?? "");
@@ -290,13 +353,6 @@ function explicitGroundingAnchors(draft: KnowledgeDraft): string[] {
     ...quoted,
     ...codeLike,
   ].map((value) => value.trim()).filter((value) => value.length >= 2))];
-}
-
-function ungroundedAnchors(draft: KnowledgeDraft, evidenceById: Map<string, Evidence>): string[] {
-  const cited = draft.evidenceIds.map((id) => evidenceById.get(id));
-  if (cited.some((item) => !item)) return ["missing_evidence_reference"];
-  const corpus = cited.map((item) => [item!.path, item!.symbol, item!.sourceRef, item!.content, JSON.stringify(item!.payload)].join("\n")).join("\n").toLowerCase();
-  return explicitGroundingAnchors(draft).filter((anchor) => !corpus.includes(anchor.toLowerCase()));
 }
 
 function stringValues(value: unknown): string[] {
@@ -329,6 +385,45 @@ function deterministicSignals(item: Evidence): Set<string> {
     ...stringValues(payload.factories).map((value) => `factory:${value}`),
     ...stringValues(payload.mocks).map((value) => `mock:${value}`),
   ]);
+}
+
+export type CitationIssue = {
+  anchor: string;
+  reason: "not_in_evidence" | "line_out_of_range" | "missing_evidence_reference";
+};
+
+/**
+ * Why a draft's citations do not hold up, for the run ledger.
+ *
+ * A bare "does this string appear in the cited evidence" test cannot tell that two true facts
+ * came from different places. When an anchor carries a line range, that range must sit inside
+ * the span of a source the draft actually cites — so a claim cannot borrow a source that merely
+ * mentions the same words somewhere else in the file.
+ */
+export function citationIssues(draft: KnowledgeDraft, cited: Array<Evidence | undefined>): CitationIssue[] {
+  if (cited.some((item) => !item)) return [{ anchor: "", reason: "missing_evidence_reference" }];
+  const sources = cited as Evidence[];
+  const corpus = sources.map((item) => [item.path, item.symbol, item.sourceRef, item.content, JSON.stringify(item.payload)].join("\n")).join("\n").toLowerCase();
+  const issues: CitationIssue[] = [];
+  for (const anchor of explicitGroundingAnchors(draft)) {
+    // A `path:start-end` anchor claims a location. Judge the location, not the literal string:
+    // the path is usually present as a path, not as a citation-shaped substring.
+    const span = /^(.+?):(\d+)-(\d+)$/u.exec(anchor);
+    if (span) {
+      const path = span[1] ?? "";
+      const start = Number(span[2]);
+      const end = Number(span[3]);
+      if (!corpus.includes(path.toLowerCase())) {
+        issues.push({ anchor, reason: "not_in_evidence" });
+        continue;
+      }
+      const covered = sources.some((item) => item.path === path && start >= item.lineStart && end <= item.lineEnd);
+      if (!covered) issues.push({ anchor, reason: "line_out_of_range" });
+      continue;
+    }
+    if (!corpus.includes(anchor.toLowerCase())) issues.push({ anchor, reason: "not_in_evidence" });
+  }
+  return issues;
 }
 
 function clusterKey(draft: EvidenceClusterDraft, repo: string): string {
@@ -389,7 +484,8 @@ function buildRelations(
     for (const evidenceId of card.evidenceIds) {
       add("SUPPORTED_BY", { kind: "knowledge", id: card.id }, { kind: "evidence", id: evidenceId }, [evidenceId], 1);
       const source = evidenceRecordById.get(evidenceId);
-      const hasBehaviorOracle = card.observed.assertions.length > 0 || card.observed.expectedExceptions.length > 0;
+      const signals = source ? deterministicSignals(source) : new Set<string>();
+      const hasBehaviorOracle = [...signals].some((signal) => signal.startsWith("assertion:") || signal.startsWith("exception:"));
       if (source?.sourceType === "test_code" && source.payload.isTest === true && hasBehaviorOracle) {
         add("VERIFIES", { kind: "evidence", id: evidenceId }, { kind: "knowledge", id: card.id }, [evidenceId], 0.7);
       }
@@ -437,6 +533,15 @@ function buildRelations(
     if (!relations.some((item) => item.id === relation.id)) relations.push(relation);
   }
   return relations;
+}
+
+/**
+ * The knowledge layer holds review-gated semantic claims. Deterministic rule output is an
+ * observation of evidence, not a claim, so it is filtered out of every knowledge read path
+ * rather than rewritten in storage — the `knowledge-changes` audit trail stays intact.
+ */
+function isKnowledgeLayer(card: KnowledgeCard): boolean {
+  return card.proposalProvenance.source !== "deterministic_extractor";
 }
 
 function isApplicable(card: KnowledgeCard, request: ContextRequest): boolean {
@@ -622,14 +727,189 @@ export class KnowledgeEngine {
     private readonly llmExtractor?: CandidateExtractor,
     private readonly structuralContextProvider?: StructuralContextProvider,
     private readonly projectEvidenceProviders: ProjectEvidenceProvider[] = [],
+    private readonly evidenceToolRuntime?: EvidenceToolRuntime,
   ) {}
+
+  /**
+   * Runs one pipeline stage and persists an execution record for it.
+   *
+   * The record is written the moment the stage ends, so a stage that throws still
+   * leaves a durable row before the error propagates. Item-level entries are batched
+   * into that same write; the ledger is read-all-then-rewrite, so one write per item
+   * would degrade it to O(n^2).
+   */
+  private async traced<T>(
+    stage: RunStage,
+    base: { repo: string; revision: string; fingerprint: string; extractor: string },
+    fn: (trace: RunTrace) => Promise<T>,
+    countsOf?: (value: T) => Record<string, number>,
+  ): Promise<T> {
+    const startedAt = isoNow();
+    const startedMs = Date.now();
+    const runId = executionRunId(base.repo, base.revision, stage, base.extractor, startedAt);
+    const entries: RunTraceEntry[] = [];
+    const trace: RunTrace = { runId, addItem: (entry) => { entries.push(entry); } };
+    let value: T;
+    try {
+      value = await fn(trace);
+    } catch (error) {
+      try {
+        await this.persistRun({ stage, base, runId, entries, startedAt, startedMs, disposition: "failed", counts: {}, error });
+      } catch {
+        // A ledger write must never replace the stage failure it is recording.
+      }
+      throw error;
+    }
+    await this.persistRun({ stage, base, runId, entries, startedAt, startedMs, disposition: "done", counts: countsOf?.(value) ?? {} });
+    return value;
+  }
+
+  private async persistRun(input: {
+    stage: RunStage;
+    base: { repo: string; revision: string; fingerprint: string; extractor: string };
+    runId: string;
+    entries: RunTraceEntry[];
+    startedAt: string;
+    startedMs: number;
+    disposition: RunDisposition;
+    counts: Record<string, number>;
+    error?: unknown;
+  }): Promise<void> {
+    const { repository } = this;
+    if (repository.appendRun) {
+      await repository.appendRun({
+        id: input.runId,
+        repo: input.base.repo,
+        revision: input.base.revision,
+        stage: input.stage,
+        extractor: input.base.extractor,
+        fingerprint: input.base.fingerprint,
+        disposition: input.disposition,
+        startedAt: input.startedAt,
+        finishedAt: isoNow(),
+        durationMs: Math.max(0, Date.now() - input.startedMs),
+        attempt: 1,
+        errorCode: input.error === undefined ? null : runErrorCode(input.error),
+        errorMessage: runErrorMessage(input.error),
+        counts: input.counts,
+        warnings: input.entries
+          .filter((entry) => entry.disposition === "failed")
+          .map((entry) => `${entry.itemKey}:failed`),
+      });
+    }
+    if (repository.appendRunItems && input.entries.length > 0) {
+      await repository.appendRunItems(input.entries.map((entry) => ({
+        id: runItemRecordId(input.runId, entry.itemKind, entry.itemKey),
+        runId: input.runId,
+        itemKey: entry.itemKey,
+        itemKind: entry.itemKind,
+        disposition: entry.disposition,
+        attempt: 1,
+        durationMs: entry.durationMs ?? 0,
+        errorCode: entry.errorCode ?? null,
+        errorMessage: entry.errorMessage ?? "",
+        createdAt: isoNow(),
+      })));
+    }
+  }
+
+  async listExtractionRuns(repo?: string, revision?: string): Promise<ExecutionRun[]> {
+    const runs = await this.repository.readRuns?.() ?? [];
+    return runs.filter((run) => (!repo || run.repo === repo) && (!revision || run.revision === revision));
+  }
+
+  async getExtractionRun(id: string): Promise<ExecutionRun | null> {
+    const runs = await this.repository.readRuns?.() ?? [];
+    return runs.find((run) => run.id === id) ?? null;
+  }
+
+  async listRunItems(runId: string): Promise<RunItem[]> {
+    return await this.repository.readRunItems?.(runId) ?? [];
+  }
+
+  /** The search index serves the knowledge layer only; observations are projected on read. */
+  private async reindex(cards: KnowledgeCard[]): Promise<void> {
+    await this.index.rebuild(cards.filter(isKnowledgeLayer));
+  }
+
+  /**
+   * Drive a shard-aware extractor one shard at a time.
+   *
+   * A shard that fails is recorded and skipped rather than aborting the batch, and each shard's
+   * own output budget comes from the planner, so no single call can consume the whole
+   * repository's allowance. Only when every shard fails does the caller fall back to
+   * deterministic extraction.
+   */
+  private async extractSharded(
+    extractor: ShardedCandidateExtractor,
+    evidence: Evidence[],
+    scope: ProjectScope,
+    runBase: { repo: string; revision: string; fingerprint: string; extractor: string },
+  ): Promise<{ extraction: CandidateExtractionResult; evidence: Evidence[]; readLog: ReadLogEntry[] }> {
+    const shards = planExtractionShards(evidence, { repo: scope.repo });
+    const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+    const drafts: KnowledgeDraft[] = [];
+    const clusters: EvidenceClusterDraft[] = [];
+    const discovered: Evidence[] = [];
+    const readLog: ReadLogEntry[] = [];
+    const runtime = this.evidenceToolRuntime;
+    const agenticExtractor = runtime !== undefined && isAgenticShardExtractor(extractor) ? extractor : undefined;
+    let failed = 0;
+    await this.traced("knowledge_extraction", { ...runBase, extractor: extractor.id }, async (trace) => {
+      for (const shard of shards) {
+        const startedMs = Date.now();
+        const shardEvidence = shard.evidenceIds.flatMap((id) => {
+          const item = evidenceById.get(id);
+          return item ? [item] : [];
+        });
+        try {
+          const result = await withBackoff(async () => {
+            const agentic = agenticExtractor;
+            if (agentic === undefined || runtime === undefined) return await extractor.extractShard(shard, shardEvidence, scope);
+            const run = await runAgenticExtraction({
+              runtime,
+              step: (messages) => agentic.step(messages),
+              scope,
+              messages: agentic.beginShard(shard, shardEvidence),
+            });
+            discovered.push(...run.evidence);
+            readLog.push(...run.readLog);
+            return agentic.finishShard(shard, [...shardEvidence, ...run.evidence], run.content);
+          });
+          const parts = extractionParts(result);
+          drafts.push(...parts.drafts);
+          clusters.push(...parts.clusters);
+          trace.addItem({ itemKey: `${shard.kind}:${shard.subject}`, itemKind: "shard", disposition: "done", durationMs: Date.now() - startedMs });
+        } catch (error) {
+          failed += 1;
+          trace.addItem({ itemKey: `${shard.kind}:${shard.subject}`, itemKind: "shard", disposition: "failed", durationMs: Date.now() - startedMs, errorCode: runErrorCode(error), errorMessage: runErrorMessage(error) });
+        }
+      }
+      if (shards.length > 0 && failed === shards.length) throw new Error(`All ${shards.length} extraction shards failed`);
+    }, () => ({ shards: shards.length, drafts: drafts.length, clusters: clusters.length, failed, toolReads: readLog.length }));
+    return { extraction: { drafts, clusters }, evidence: discovered, readLog };
+  }
 
   async buildFromRepository(raw: BuildRequest, scanner: ProjectScanner): Promise<BuildResult> {
     const request = BuildRequestSchema.parse(raw);
     const repo = resolve(request.repo);
-    const baseScan = request.files
-      ? { files: request.files, summary: { mode: "explicit" as const, fileCount: request.files.length, testDirectories: [], configFiles: [], environmentFiles: [], warnings: [] } }
-      : await scanner.scan(repo);
+    const baseScan = await this.traced(
+      "scan",
+      {
+        repo,
+        revision: PRESCAN_REVISION,
+        extractor: "project-scanner",
+        fingerprint: digest(JSON.stringify({ repo, stage: "scan" })),
+      },
+      async (trace) => {
+        const result = request.files
+          ? { files: request.files, summary: { mode: "explicit" as const, fileCount: request.files.length, testDirectories: [], configFiles: [], environmentFiles: [], warnings: [] } }
+          : await scanner.scan(repo);
+        trace.addItem({ itemKey: "scan", itemKind: "evidence", disposition: "done", durationMs: 0 });
+        return result;
+      },
+      (value) => ({ files: value.files.length }),
+    );
     const filesByPath = new Map(baseScan.files.map((file) => [file.path, file]));
     for (const file of request.additionalFiles) filesByPath.set(file.path, file);
     const sourceSpecs = [...filesByPath.values()];
@@ -655,37 +935,73 @@ export class KnowledgeEngine {
     const previousEvidence = await this.repository.readEvidence();
     const previousEvidenceById = new Map(previousEvidence.map((item) => [item.id, item]));
     for (const adapter of this.sourceAdapters) await adapter.prepare?.(input.repo);
-    const revision = digest(input.files.map((file) => `${file.path}:${digest(file.text)}`).sort().join("\n"));
+    let revision = digest(input.files.map((file) => `${file.path}:${digest(file.text)}`).sort().join("\n"));
     const scope: ProjectScope = { repo: input.repo, revision };
+    const intendedExtractors = input.useLlm && this.llmExtractor ? [this.llmExtractor.id] : [this.ruleExtractor.id];
+    let runBase = {
+      repo: input.repo,
+      revision,
+      extractor: intendedExtractors.join("+"),
+      fingerprint: digest(JSON.stringify({ repo: input.repo, revision, extractors: intendedExtractors, useLlm: Boolean(input.useLlm && this.llmExtractor) })),
+    };
     const evidence: Evidence[] = [];
-    for (const file of input.files) {
-      const adapter = this.sourceAdapters.find((item) => item.supports(file));
-      if (!adapter) continue;
-      evidence.push(...await adapter.collect(file, scope));
-    }
-    const warnings: string[] = [];
-    for (const provider of this.projectEvidenceProviders) {
-      try {
-        evidence.push(...await provider.collect(scope));
-      } catch {
-        warnings.push(`${provider.id}:failed`);
+    await this.traced("source_evidence", runBase, async (trace) => {
+      const startedMs = Date.now();
+      for (const file of input.files) {
+        const adapter = this.sourceAdapters.find((item) => item.supports(file));
+        if (!adapter) continue;
+        evidence.push(...await adapter.collect(file, scope));
       }
-    }
+      trace.addItem({ itemKey: "source_files", itemKind: "evidence", disposition: "done", durationMs: Date.now() - startedMs });
+    }, () => ({ evidence: evidence.length }));
+    const warnings: string[] = [];
+    await this.traced("project_evidence", runBase, async (trace) => {
+      for (const provider of this.projectEvidenceProviders) {
+        const startedMs = Date.now();
+        try {
+          evidence.push(...await provider.collect(scope));
+          trace.addItem({ itemKey: provider.id, itemKind: "provider", disposition: "done", durationMs: Date.now() - startedMs });
+        } catch (error) {
+          warnings.push(`${provider.id}:failed`);
+          trace.addItem({ itemKey: provider.id, itemKind: "provider", disposition: "failed", durationMs: Date.now() - startedMs, errorCode: runErrorCode(error), errorMessage: runErrorMessage(error) });
+        }
+      }
+    }, () => ({ providers: this.projectEvidenceProviders.length, evidence: evidence.length }));
     let extraction: CandidateExtractionResult;
     let extractors: string[];
+    const toolEvidence: Evidence[] = [];
+    const readLog: ReadLogEntry[] = [];
     if (input.useLlm && this.llmExtractor) {
+      const llm = this.llmExtractor;
       try {
-        extraction = await this.llmExtractor.extract(evidence, scope);
-        extractors = [this.llmExtractor.id];
+        if (isShardedExtractor(llm)) {
+          const sharded = await this.extractSharded(llm, evidence, scope, runBase);
+          extraction = sharded.extraction;
+          toolEvidence.push(...sharded.evidence);
+          readLog.push(...sharded.readLog);
+        } else {
+          extraction = await this.traced("knowledge_extraction", { ...runBase, extractor: llm.id }, async () => llm.extract(evidence, scope), extractionCounts);
+        }
+        extractors = [llm.id];
       } catch {
-        warnings.push(`${this.llmExtractor.id}:failed`);
-        extraction = await this.ruleExtractor.extract(evidence, scope);
+        warnings.push(`${llm.id}:failed`);
+        extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(evidence, scope), extractionCounts);
         extractors = [this.ruleExtractor.id];
       }
     } else {
       if (input.useLlm) warnings.push("llm:unconfigured");
-      extraction = await this.ruleExtractor.extract(evidence, scope);
+      extraction = await this.traced("rule_extraction", runBase, async () => this.ruleExtractor.extract(evidence, scope), extractionCounts);
       extractors = [this.ruleExtractor.id];
+    }
+    // The model chose what to read, so this build is no longer determined by the repository
+    // alone. Folding the read log into the revision is what keeps it reproducible; the read
+    // itself stays out of the response-cache key so a cached answer is never keyed on it.
+    if (readLog.length > 0) {
+      const readLogDigest = digest(JSON.stringify(readLog.map((entry) => ({ tool: entry.tool, target: entry.target, contentHash: entry.contentHash })).sort((left, right) => left.target.localeCompare(right.target))));
+      revision = digest(`${revision}:${readLogDigest}`);
+      scope.revision = revision;
+      runBase = { ...runBase, revision, fingerprint: digest(JSON.stringify({ repo: input.repo, revision, extractors: intendedExtractors, readLog: readLogDigest })) };
+      for (const item of toolEvidence) evidence.push({ ...item, revision });
     }
     const extracted = extractionParts(extraction);
     const evidenceById = new Map(evidence.map((item) => [item.id, item]));
@@ -698,102 +1014,140 @@ export class KnowledgeEngine {
     if (extractors.includes(this.llmExtractor?.id ?? "")) {
       const grounded: KnowledgeDraft[] = [];
       let rejected = 0;
+      let misplaced = 0;
       for (const draft of extractedDrafts) {
-        if (ungroundedAnchors(draft, evidenceById).length > 0) rejected += 1;
-        else grounded.push(draft);
+        const issues = citationIssues(draft, draft.evidenceIds.map((id) => evidenceById.get(id)));
+        if (issues.length === 0) {
+          grounded.push(draft);
+          continue;
+        }
+        rejected += 1;
+        if (issues.some((issue) => issue.reason !== "not_in_evidence")) misplaced += 1;
       }
       extractedDrafts = grounded;
       if (rejected > 0) warnings.push(`llm:ungrounded_cards_rejected:${rejected}`);
+      if (misplaced > 0) warnings.push(`llm:misplaced_citations_rejected:${misplaced}`);
     }
-    const previousClusters = await this.repository.readClusters?.() ?? [];
-    const materialized = materializeClusters(extracted.clusters, evidence, scope, previousClusters);
-    if (materialized.invalidCount > 0) warnings.push(`clusters:rejected:${materialized.invalidCount}`);
-    const proposedClusterIds = new Set(materialized.clusters.map((cluster) => cluster.id));
-    const proposedEvidenceIds = new Set(materialized.clusters.flatMap((cluster) => cluster.evidenceIds));
-    const currentEvidenceIds = new Set(evidence.map((item) => item.id));
-    const currentClusters = [...materialized.clusters];
-    for (const old of previousClusters.filter((cluster) => cluster.repo === input.repo && !proposedClusterIds.has(cluster.id))) {
-      const stillSupported = old.evidenceIds.every((id) => currentEvidenceIds.has(id));
-      const superseded = old.evidenceIds.some((id) => proposedEvidenceIds.has(id));
-      currentClusters.push(stillSupported && !superseded
-        ? { ...old, revision: scope.revision }
-        : { ...old, status: "stale", updatedAt: isoNow() });
-    }
-    const clusters = [...previousClusters.filter((cluster) => cluster.repo !== input.repo), ...currentClusters];
-    const validClusterIds = new Set(currentClusters.filter((cluster) => cluster.status !== "stale" && cluster.status !== "rejected").map((cluster) => cluster.id));
+    const clusterStage = await this.traced("cluster_materialization", runBase, async (trace) => {
+      const previousClusters = await this.repository.readClusters?.() ?? [];
+      const materialized = materializeClusters(extracted.clusters, evidence, scope, previousClusters);
+      if (materialized.invalidCount > 0) warnings.push(`clusters:rejected:${materialized.invalidCount}`);
+      const proposedClusterIds = new Set(materialized.clusters.map((cluster) => cluster.id));
+      const proposedEvidenceIds = new Set(materialized.clusters.flatMap((cluster) => cluster.evidenceIds));
+      const currentEvidenceIds = new Set(evidence.map((item) => item.id));
+      const currentClusters = [...materialized.clusters];
+      for (const old of previousClusters.filter((cluster) => cluster.repo === input.repo && !proposedClusterIds.has(cluster.id))) {
+        const stillSupported = old.evidenceIds.every((id) => currentEvidenceIds.has(id));
+        const superseded = old.evidenceIds.some((id) => proposedEvidenceIds.has(id));
+        currentClusters.push(stillSupported && !superseded
+          ? { ...old, revision: scope.revision }
+          : { ...old, status: "stale", updatedAt: isoNow() });
+      }
+      const clusters = [...previousClusters.filter((cluster) => cluster.repo !== input.repo), ...currentClusters];
+      const validClusterIds = new Set(currentClusters.filter((cluster) => cluster.status !== "stale" && cluster.status !== "rejected").map((cluster) => cluster.id));
+      trace.addItem({ itemKey: "clusters", itemKind: "shard", disposition: "done", durationMs: 0 });
+      return {
+        clusters,
+        validClusterIds,
+        currentClusters,
+        proposed: materialized.clusters.length,
+        stale: currentClusters.filter((cluster) => cluster.status === "stale").length,
+        rejected: materialized.invalidCount,
+      };
+    }, (value) => ({ proposed: value.proposed, stale: value.stale, rejected: value.rejected, total: value.clusters.length }));
+    const { clusters, validClusterIds, currentClusters } = clusterStage;
     const drafts = extractedDrafts.flatMap((draft): KnowledgeDraft[] => {
       if (!draft.clusterEvidenceIds || !draft.clusterSubject || !draft.clusterShape) return [draft];
       const clusterId = stableClusterId({ subject: draft.clusterSubject, shape: draft.clusterShape, evidenceIds: draft.clusterEvidenceIds, confidence: draft.confidence, extractor: this.llmExtractor?.id ?? "unknown" }, input.repo);
       return validClusterIds.has(clusterId) ? [{ ...draft, clusterId }] : [];
     });
-    const previous = await this.repository.readKnowledge();
-    const previousById = new Map(previous.map((card) => [card.id, card]));
-    let invalidatedCount = 0;
-    const generatedCards = drafts.map((draft) => {
-      const id = stableCardId(draft, input.repo);
-      const old = previousById.get(id);
-      const oldSupport = old ? supportFingerprint(old.evidenceIds, previousEvidenceById) : null;
-      const currentSupport = supportFingerprint(draft.evidenceIds, evidenceById);
-      const oldDependencies = old ? dependencyFingerprint(old.evidenceIds, old.targetSymbols, old.applicability.frameworks, previousEvidenceById, old.revision) : "[]";
-      const currentDependencies = dependencyFingerprint(draft.evidenceIds, draft.targetSymbols ?? [], draft.applicability?.frameworks ?? [], evidenceById, scope.revision);
-      const preserveLifecycle = Boolean(
-        old &&
-        old.sourceHash === digest(cardKey(draft, input.repo)) &&
-        oldSupport !== null &&
-        oldSupport === currentSupport &&
-        oldDependencies === currentDependencies
-      );
-      const proposalProvenance: KnowledgeCard["proposalProvenance"] = extractors.includes(this.llmExtractor?.id ?? "")
-        ? { source: "llm_extractor", actor: this.llmExtractor?.id ?? "unknown", note: "Semantic candidate proposed from validated evidence references" }
-        : { source: "deterministic_extractor", actor: this.ruleExtractor.id, note: "Candidate produced by deterministic extraction rules" };
-      const card = toCard(draft, scope, old, "extracted", preserveLifecycle, proposalProvenance);
-      if (old && !preserveLifecycle && (old.status === "reviewed" || old.status === "verified")) {
-        invalidatedCount += 1;
-        return { ...card, status: "stale" as const, validationEvidenceIds: [] };
-      }
-      return card;
-    });
-    const generatedIds = new Set(generatedCards.map((card) => card.id));
-    const preservedManual = previous.flatMap((card): KnowledgeCard[] => {
-      if (card.repo !== input.repo || card.origin !== "manual" || generatedIds.has(card.id)) return [];
-      const remappedEvidence = card.evidenceIds.map((id) => {
-        const oldEvidence = previousEvidenceById.get(id);
-        if (!oldEvidence) return undefined;
-        const matches = evidenceBySemanticKey.get(evidenceSemanticKey(oldEvidence)) ?? [];
-        return matches.length === 1 ? matches[0] : undefined;
+    // Deterministic rule output is an observation of evidence, not a claim, so the rule
+    // extractor produces no knowledge cards at all. Those facts reach consumers through the
+    // observation layer, which is projected on read.
+    const knowledgeDrafts = extractors.includes(this.llmExtractor?.id ?? "") ? drafts : [];
+    const cardStage = await this.traced("card_materialization", runBase, async (trace) => {
+      const previous = await this.repository.readKnowledge();
+      const previousById = new Map(previous.map((card) => [card.id, card]));
+      let invalidatedCount = 0;
+      const generatedCards = knowledgeDrafts.map((draft) => {
+        const id = stableCardId(draft, input.repo);
+        const old = previousById.get(id);
+        const oldSupport = old ? supportFingerprint(old.evidenceIds, previousEvidenceById) : null;
+        const currentSupport = supportFingerprint(draft.evidenceIds, evidenceById);
+        const oldDependencies = old ? dependencyFingerprint(old.evidenceIds, old.targetSymbols, old.applicability.frameworks, previousEvidenceById, old.revision) : "[]";
+        const currentDependencies = dependencyFingerprint(draft.evidenceIds, draft.targetSymbols ?? [], draft.applicability?.frameworks ?? [], evidenceById, scope.revision);
+        const preserveLifecycle = Boolean(
+          old &&
+          old.sourceHash === digest(cardKey(draft, input.repo)) &&
+          oldSupport !== null &&
+          oldSupport === currentSupport &&
+          oldDependencies === currentDependencies
+        );
+        const proposalProvenance: KnowledgeCard["proposalProvenance"] = extractors.includes(this.llmExtractor?.id ?? "")
+          ? { source: "llm_extractor", actor: this.llmExtractor?.id ?? "unknown", note: "Semantic candidate proposed from validated evidence references" }
+          : { source: "deterministic_extractor", actor: this.ruleExtractor.id, note: "Candidate produced by deterministic extraction rules" };
+        const card = toCard(draft, scope, old, "extracted", preserveLifecycle, proposalProvenance);
+        if (old && !preserveLifecycle && (old.status === "reviewed" || old.status === "verified")) {
+          invalidatedCount += 1;
+          return { ...card, status: "stale" as const, validationEvidenceIds: [] };
+        }
+        return card;
       });
-      if (remappedEvidence.some((item) => !item)) return [];
-      const dependenciesStable = dependencyFingerprint(card.evidenceIds, card.targetSymbols, card.applicability.frameworks, previousEvidenceById, card.revision)
-        === dependencyFingerprint(remappedEvidence.map((item) => item!.id), card.targetSymbols, card.applicability.frameworks, evidenceById, scope.revision);
-      const requiresReevaluation = !dependenciesStable && (card.status === "reviewed" || card.status === "verified");
-      if (requiresReevaluation) invalidatedCount += 1;
-      return [{
-        ...card,
-        revision: scope.revision,
-        applicability: { ...card.applicability, revision: scope.revision },
-        evidenceIds: remappedEvidence.map((item) => item!.id),
-        status: requiresReevaluation ? "stale" : card.status,
-        validationEvidenceIds: requiresReevaluation ? [] : card.validationEvidenceIds,
-        updatedAt: requiresReevaluation ? isoNow() : card.updatedAt,
-      }];
-    });
-    const cards = [
-      ...previous.filter((card) => card.repo !== input.repo),
-      ...preservedManual,
-      ...generatedCards,
-    ];
-    const currentIds = new Set(cards.map((card) => card.id));
-    for (const old of previous) {
-      if (old.repo === input.repo && !currentIds.has(old.id) && old.status !== "rejected") {
-        if (old.status === "reviewed" || old.status === "verified") invalidatedCount += 1;
-        cards.push({ ...old, status: "stale", updatedAt: isoNow() });
+      const generatedIds = new Set(generatedCards.map((card) => card.id));
+      const preservedManual = previous.flatMap((card): KnowledgeCard[] => {
+        if (card.repo !== input.repo || card.origin !== "manual" || generatedIds.has(card.id)) return [];
+        const remappedEvidence = card.evidenceIds.map((id) => {
+          const oldEvidence = previousEvidenceById.get(id);
+          if (!oldEvidence) return undefined;
+          const matches = evidenceBySemanticKey.get(evidenceSemanticKey(oldEvidence)) ?? [];
+          return matches.length === 1 ? matches[0] : undefined;
+        });
+        if (remappedEvidence.some((item) => !item)) return [];
+        const dependenciesStable = dependencyFingerprint(card.evidenceIds, card.targetSymbols, card.applicability.frameworks, previousEvidenceById, card.revision)
+          === dependencyFingerprint(remappedEvidence.map((item) => item!.id), card.targetSymbols, card.applicability.frameworks, evidenceById, scope.revision);
+        const requiresReevaluation = !dependenciesStable && (card.status === "reviewed" || card.status === "verified");
+        if (requiresReevaluation) invalidatedCount += 1;
+        return [{
+          ...card,
+          revision: scope.revision,
+          applicability: { ...card.applicability, revision: scope.revision },
+          evidenceIds: remappedEvidence.map((item) => item!.id),
+          status: requiresReevaluation ? "stale" : card.status,
+          validationEvidenceIds: requiresReevaluation ? [] : card.validationEvidenceIds,
+          updatedAt: requiresReevaluation ? isoNow() : card.updatedAt,
+        }];
+      });
+      // Observations already in storage are carried forward untouched rather than removed or
+      // re-staled: they are invisible to every knowledge read path, and rewriting them would
+      // churn the knowledge-changes audit trail for no readable effect.
+      const untouched = previous.filter((card) => card.repo === input.repo && !isKnowledgeLayer(card) && !generatedIds.has(card.id));
+      const cards = [
+        ...previous.filter((card) => card.repo !== input.repo),
+        ...untouched,
+        ...preservedManual,
+        ...generatedCards,
+      ];
+      const currentIds = new Set(cards.map((card) => card.id));
+      for (const old of previous) {
+        if (old.repo === input.repo && isKnowledgeLayer(old) && !currentIds.has(old.id) && old.status !== "rejected") {
+          if (old.status === "reviewed" || old.status === "verified") invalidatedCount += 1;
+          cards.push({ ...old, status: "stale", updatedAt: isoNow() });
+        }
       }
-    }
-    if (invalidatedCount > 0) warnings.push(`knowledge:invalidated_by_evidence_change:${invalidatedCount}`);
-    const previousRelations = await this.repository.readRelations?.() ?? [];
-    const retainedEvidence = [...new Map([...previousEvidence, ...evidence].map((item) => [item.id, item])).values()];
-    const currentRelations = buildRelations(evidence, cards.filter((card) => card.repo === input.repo && card.status !== "stale"), scope, previousRelations, retainedEvidence);
-    const relations = [...previousRelations.filter((item) => item.repo !== input.repo), ...currentRelations];
+      if (invalidatedCount > 0) warnings.push(`knowledge:invalidated_by_evidence_change:${invalidatedCount}`);
+      trace.addItem({ itemKey: "cards", itemKind: "draft", disposition: "done", durationMs: 0 });
+      return { previousById, cards, generated: generatedCards.length, preserved: preservedManual.length, invalidated: invalidatedCount };
+    }, (value) => ({ generated: value.generated, preserved: value.preserved, invalidated: value.invalidated, total: value.cards.length }));
+    const { previousById, cards } = cardStage;
+    const relationStage = await this.traced("relations", runBase, async (trace) => {
+      const previousRelations = await this.repository.readRelations?.() ?? [];
+      const retainedEvidence = [...new Map([...previousEvidence, ...evidence].map((item) => [item.id, item])).values()];
+      const currentRelations = buildRelations(evidence, cards.filter((card) => card.repo === input.repo && card.status !== "stale" && isKnowledgeLayer(card)), scope, previousRelations, retainedEvidence);
+      const relations = [...previousRelations.filter((item) => item.repo !== input.repo), ...currentRelations];
+      trace.addItem({ itemKey: "relations", itemKind: "index", disposition: "done", durationMs: 0 });
+      return { currentRelations, relations };
+    }, (value) => ({ current: value.currentRelations.length, total: value.relations.length }));
+    const { currentRelations, relations } = relationStage;
     await this.repository.writeBuild(evidence, cards, relations, clusters);
     const changes = cards.flatMap((card) => {
       if (card.repo !== input.repo) return [];
@@ -803,7 +1157,10 @@ export class KnowledgeEngine {
         : [knowledgeChange("build", extractors.join("+") || "static-build", "Repository extraction refresh", before, card)];
     });
     await this.repository.appendKnowledgeChanges?.(changes);
-    await this.index.rebuild(cards);
+    await this.traced("index_rebuild", runBase, async (trace) => {
+      await this.reindex(cards);
+      trace.addItem({ itemKey: "cards_index", itemKind: "index", disposition: "done", durationMs: 0 });
+    }, () => ({ indexed: cards.length }));
     return { repo: input.repo, revision, evidenceCount: evidence.length, knowledgeCount: cards.length, relationCount: currentRelations.length, clusterCount: currentClusters.length, extractor: extractors, warnings };
   }
 
@@ -839,7 +1196,7 @@ export class KnowledgeEngine {
       includeCandidates: request.includeCandidates,
       limit: request.limit,
     });
-    const cards = await this.repository.readKnowledge();
+    const cards = (await this.repository.readKnowledge()).filter(isKnowledgeLayer);
     const evidence = await this.repository.readEvidence();
     const projectMap = requestedProjectMap;
     const clusters = await this.repository.readClusters?.() ?? [];
@@ -902,6 +1259,15 @@ export class KnowledgeEngine {
         createdAt: isoNow(),
       };
     })) : [];
+    const requestedEvidence = evidence.filter((item) => item.repo === request.repo
+      && (!request.revision || item.revision === request.revision)
+      && (request.changedFiles.includes(item.path) || (item.symbol !== "" && request.targetSymbols.includes(item.symbol))));
+    const observationEvidence = [...new Map([...selectedEvidence, ...requestedEvidence].map((item) => [item.id, item])).values()];
+    const newestFirst = [...observationEvidence].sort((left, right) => right.extractedAt.localeCompare(left.extractedAt));
+    const observationRevision = request.revision ?? newestFirst[0]?.revision;
+    const observations = observationRevision
+      ? materializeObservations(observationEvidence.filter((item) => item.revision === observationRevision), { repo: request.repo, revision: observationRevision })
+      : [];
     const abstentions: string[] = [];
     if (eligibleByStatus.length > eligibleByCluster.length) abstentions.push("unreviewed_or_missing_cluster_excluded");
     if (eligibleByCluster.length > eligible.length) abstentions.push("inapplicable_knowledge_excluded");
@@ -930,6 +1296,7 @@ export class KnowledgeEngine {
         const cluster = clustersById.get(id);
         return cluster ? [cluster] : [];
       }),
+      observations,
       relations: [...persistedRelations, ...structuralRelations],
       impactSummary: {
         changedFiles: request.changedFiles,
@@ -941,9 +1308,9 @@ export class KnowledgeEngine {
       existingTests: existingTestEvidence.map((item) => ({ path: item.path, symbol: item.symbol, sourceRef: item.sourceRef, evidenceId: item.id })),
       testDesignKnowledge: knowledge,
       fixturesAndMocks: {
-        fixtures: unique(knowledge.flatMap((card) => card.observed.dependencies)),
-        factories: unique(knowledge.flatMap((card) => card.observed.factories)),
-        mocks: unique(knowledge.flatMap((card) => card.observed.mocks)),
+        fixtures: unique(observations.filter((item) => item.kind === "fixture").map((item) => item.subject)),
+        factories: unique(observations.filter((item) => item.kind === "dependency").map((item) => item.subject)),
+        mocks: unique(observations.filter((item) => item.kind === "mock").map((item) => item.subject)),
       },
       oracles: knowledge.map((card) => ({ knowledgeId: card.id, oracle: card.oracle, evidenceIds: card.evidenceIds })),
       historicalRegressions: knowledge.filter((card) => card.kind === "historical_bug"),
@@ -1167,7 +1534,7 @@ export class KnowledgeEngine {
     await this.repository.writeBuild(evidence, cards.map((card) => card.id === id ? next : card), updatedRelations);
     await this.repository.appendReview({ knowledgeId: id, ...request, createdAt: isoNow() });
     await this.repository.appendKnowledgeChanges?.([knowledgeChange("review", request.reviewer, request.note, current, next)]);
-    await this.index.rebuild(cards.map((card) => card.id === id ? next : card));
+    await this.reindex(cards.map((card) => card.id === id ? next : card));
     return next;
   }
 
@@ -1198,7 +1565,7 @@ export class KnowledgeEngine {
       });
       await this.repository.appendKnowledgeChanges?.(changes);
     }
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return next;
   }
 
@@ -1222,7 +1589,7 @@ export class KnowledgeEngine {
     const retainedRelations = relations.filter((item) => !((item.type === "SUPPORTED_BY" || item.type === "VERIFIED_BY" || item.type === "INVALIDATED_BY") && item.from.kind === "knowledge" && item.from.id === id));
     await this.repository.writeBuild([], updatedCards, [...retainedRelations, ...additions]);
     await this.repository.appendKnowledgeChanges?.([knowledgeChange("create", "manual", "Manual evidence-bound knowledge created or rewritten", previous ?? null, card)]);
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return card;
   }
 
@@ -1260,7 +1627,7 @@ export class KnowledgeEngine {
     const operationId = `op_${digest(JSON.stringify({ action: "create-pack", repo: request.repo, revision: request.revision, ids, reviewer: request.reviewer, at: isoNow() })).slice(0, 24)}`;
     await this.repository.writeBuild([], updatedCards, [...retainedRelations, ...supportRelations]);
     await this.repository.appendKnowledgeChanges?.(imported.map((card) => knowledgeChange("create", request.reviewer, request.note, existingById.get(card.id) ?? null, card, [], operationId)));
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return imported;
   }
 
@@ -1324,7 +1691,7 @@ export class KnowledgeEngine {
       ...sourceCards.map((source) => knowledgeChange("merge", request.reviewer, request.note, source, updatedCards.find((card) => card.id === source.id)!, sourceKnowledgeIds, operationId)),
       knowledgeChange("merge", request.reviewer, request.note, null, merged, sourceKnowledgeIds, operationId),
     ]);
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return merged;
   }
 
@@ -1390,7 +1757,7 @@ export class KnowledgeEngine {
       const after = updatedCards.find((card) => card.id === change.knowledgeId) ?? null;
       return knowledgeChange("rollback", request.reviewer, request.note, before, after, target.sourceKnowledgeIds, operationId);
     }).filter((change) => change.before || change.after));
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return updatedCards.filter((card) => restoredById.has(card.id));
   }
 
@@ -1437,7 +1804,7 @@ export class KnowledgeEngine {
       const after = updatedCards.find((item) => item.id === card.id);
       return after && after !== card ? [knowledgeChange("conflict_resolution", request.reviewer, request.note, card, after)] : [];
     }));
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return resolved;
   }
 
@@ -1507,7 +1874,7 @@ export class KnowledgeEngine {
     await this.repository.writeBuild([evidence], updatedCards, invalidationRelation ? [...relations.filter((item) => item.id !== invalidationRelation.id), invalidationRelation] : relations);
     if (shouldInvalidate && current && next && request.oracleAssessment) {
       await this.repository.appendKnowledgeChanges?.([knowledgeChange("feedback_invalidation", request.oracleAssessment.assessor, request.oracleAssessment.note, current, next)]);
-      await this.index.rebuild(updatedCards);
+      await this.reindex(updatedCards);
     }
     return evidence;
   }
@@ -1539,16 +1906,16 @@ export class KnowledgeEngine {
     await this.repository.writeBuild([], updatedCards, [...relations.filter((item) => item.id !== relation.id), relation]);
     await this.repository.appendReview({ knowledgeId: id, status: "verified", reviewer: request.reviewer, note: request.note, createdAt: isoNow() });
     await this.repository.appendKnowledgeChanges?.([knowledgeChange("verify", request.reviewer, request.note, current, next)]);
-    await this.index.rebuild(updatedCards);
+    await this.reindex(updatedCards);
     return next;
   }
 
   async listKnowledge(): Promise<KnowledgeCard[]> {
-    return this.repository.readKnowledge();
+    return (await this.repository.readKnowledge()).filter(isKnowledgeLayer);
   }
 
   async getKnowledge(id: string): Promise<KnowledgeCard> {
-    const card = (await this.repository.readKnowledge()).find((item) => item.id === id);
+    const card = (await this.repository.readKnowledge()).find((item) => item.id === id && isKnowledgeLayer(item));
     if (!card) throw new Error(`Unknown knowledge card: ${id}`);
     return card;
   }
@@ -1563,8 +1930,13 @@ export class KnowledgeEngine {
     return await this.repository.readRelations?.() ?? [];
   }
 
+  async listEvidence(repo?: string): Promise<Evidence[]> {
+    const evidence = await this.repository.readEvidence();
+    return repo ? evidence.filter((item) => item.repo === repo) : evidence;
+  }
+
   async exportMemory(): Promise<string> {
-    const cards = (await this.repository.readKnowledge()).filter((card) => card.status === "verified");
+    const cards = (await this.repository.readKnowledge()).filter((card) => card.status === "verified" && isKnowledgeLayer(card));
     return cards.map((card) => `## ${card.title}\n\n- 适用：${card.trigger}\n- 规则：${card.statement}\n- 手法：${card.techniques.join("、") || "未标注"}\n- 预期：${card.expectedBehavior}\n- 断言：${card.oracle}\n- 来源：${card.evidenceIds.join(", ")}\n`).join("\n");
   }
 

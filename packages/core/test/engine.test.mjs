@@ -50,12 +50,21 @@ class StubAdapter {
         lineStart: 1,
         lineEnd: 1,
         contentHash,
+        extractedAt: "2026-09-15T00:00:00.000Z",
+        extractor: "stub-adapter",
+        content: file.text,
+        confidence: 0.5,
         payload: { text: file.text },
       },
     ];
   }
 }
 
+/**
+ * Stands in for the semantic knowledge producer. Deterministic rule output is an observation
+ * of evidence and never becomes a knowledge card, so a stub that should yield cards must take
+ * the LLM slot and builds must run with `useLlm: true`.
+ */
 class StubExtractor {
   id = "stub-extractor";
 
@@ -76,32 +85,44 @@ class StubExtractor {
   }
 }
 
+const noopExtractor = { id: "rule", extract: async () => [] };
+
 function setup() {
   const repository = new MemoryRepository();
   const adapter = new StubAdapter();
-  const engine = new KnowledgeEngine(repository, noopIndex, [adapter], new StubExtractor());
+  const engine = new KnowledgeEngine(repository, noopIndex, [adapter], noopExtractor, new StubExtractor());
   return { repository, adapter, engine };
 }
 
 const fileA = (text) => ({ path: "a.py", type: "test_code", text });
 const fileB = (text) => ({ path: "b.py", type: "test_code", text });
 
+test("rule extraction produces no knowledge cards", async () => {
+  const repository = new MemoryRepository();
+  const engine = new KnowledgeEngine(repository, noopIndex, [new StubAdapter()], new StubExtractor());
+  const result = await engine.build({ repo: "/repo", files: [fileA("A1")], useLlm: false });
+
+  assert.deepEqual(result.extractor, ["stub-extractor"]);
+  assert.equal(result.knowledgeCount, 0, "the rule extractor no longer produces knowledge cards");
+  assert.deepEqual(await engine.listKnowledge(), []);
+});
+
 test("changing one file preserves identity and review status of the others", async () => {
   const { repository, engine } = setup();
-  await engine.build({ repo: "/repo", files: [fileA("A1"), fileB("B1")], useLlm: false });
+  await engine.build({ repo: "/repo", files: [fileA("A1"), fileB("B1")], useLlm: true });
 
   const before = await repository.readKnowledge();
   const cardA = before.find((card) => card.path === "a.py");
   assert.ok(cardA);
-  await engine.review(cardA.id, { status: "verified", reviewer: "me", note: "ok" });
+  await engine.review(cardA.id, { status: "reviewed", reviewer: "me", note: "ok" });
 
-  await engine.build({ repo: "/repo", files: [fileA("A1"), fileB("B2")], useLlm: false });
+  await engine.build({ repo: "/repo", files: [fileA("A1"), fileB("B2")], useLlm: true });
   const after = await repository.readKnowledge();
 
   const aCards = after.filter((card) => card.path === "a.py");
   assert.equal(aCards.length, 1, "unchanged file must not spawn a stale duplicate");
   assert.equal(aCards[0]?.id, cardA.id, "unchanged card keeps its id");
-  assert.equal(aCards[0]?.status, "verified", "unchanged card keeps its review status");
+  assert.equal(aCards[0]?.status, "reviewed", "unchanged card keeps its review status");
 
   const bCards = after.filter((card) => card.path === "b.py");
   assert.equal(bCards.filter((card) => card.status === "candidate").length, 1);
@@ -112,43 +133,43 @@ test("changing one file preserves identity and review status of the others", asy
 test("re-running build on identical input is idempotent", async () => {
   const { repository, engine } = setup();
   const files = [fileA("A1"), fileB("B1")];
-  await engine.build({ repo: "/repo", files, useLlm: false });
+  await engine.build({ repo: "/repo", files, useLlm: true });
   const first = await repository.readKnowledge();
   const cardA = first.find((card) => card.path === "a.py");
   assert.ok(cardA);
-  await engine.review(cardA.id, { status: "verified", reviewer: "me", note: "ok" });
+  await engine.review(cardA.id, { status: "reviewed", reviewer: "me", note: "ok" });
   const reviewedUpdatedAt = (await repository.readKnowledge()).find((card) => card.path === "a.py")?.updatedAt;
 
-  await engine.build({ repo: "/repo", files, useLlm: false });
+  await engine.build({ repo: "/repo", files, useLlm: true });
   const second = await repository.readKnowledge();
   const cardAAfter = second.find((card) => card.path === "a.py");
 
   assert.equal(second.length, 2, "no growth on identical rebuild");
   assert.equal(cardAAfter?.id, cardA.id);
-  assert.equal(cardAAfter?.status, "verified");
+  assert.equal(cardAAfter?.status, "reviewed");
   assert.equal(cardAAfter?.updatedAt, reviewedUpdatedAt, "unchanged rebuild must not churn updatedAt");
 });
 
 test("card identity ignores evidence id churn", async () => {
   const { repository, adapter, engine } = setup();
-  await engine.build({ repo: "/repo", files: [fileA("A1")], useLlm: false });
+  await engine.build({ repo: "/repo", files: [fileA("A1")], useLlm: true });
   const card = (await repository.readKnowledge())[0];
   assert.ok(card);
-  await engine.review(card.id, { status: "verified", reviewer: "me", note: "ok" });
+  await engine.review(card.id, { status: "reviewed", reviewer: "me", note: "ok" });
 
   adapter.salt = "2";
-  await engine.build({ repo: "/repo", files: [fileA("A1")], useLlm: false });
+  await engine.build({ repo: "/repo", files: [fileA("A1")], useLlm: true });
   const after = await repository.readKnowledge();
 
   assert.equal(after.length, 1, "same knowledge must not duplicate when only evidence ids change");
   assert.equal(after[0]?.id, card.id);
-  assert.equal(after[0]?.status, "verified");
+  assert.equal(after[0]?.status, "reviewed");
 });
 
 test("cards from different repositories do not collide", async () => {
   const { repository, engine } = setup();
-  await engine.build({ repo: "/repo-one", files: [fileA("A1")], useLlm: false });
-  await engine.build({ repo: "/repo-two", files: [fileA("A1")], useLlm: false });
+  await engine.build({ repo: "/repo-one", files: [fileA("A1")], useLlm: true });
+  await engine.build({ repo: "/repo-two", files: [fileA("A1")], useLlm: true });
   const cards = await repository.readKnowledge();
   assert.equal(cards.length, 2);
   assert.notEqual(cards[0]?.id, cards[1]?.id);
@@ -188,7 +209,7 @@ test("LLM extraction replaces rule cards when configured", async () => {
   assert.equal(result.knowledgeCount, 1);
 });
 
-test("falls back to rule cards when the LLM fails", async () => {
+test("falling back to rule extraction yields observations, not cards", async () => {
   const repository = new MemoryRepository();
   const llm = {
     id: "llm",
@@ -198,7 +219,8 @@ test("falls back to rule cards when the LLM fails", async () => {
   };
   const engine = new KnowledgeEngine(repository, noopIndex, [new StubAdapter()], new StubExtractor(), llm);
   const result = await engine.build({ repo: "/r", files: [fileA("A1")], useLlm: true });
+
   assert.deepEqual(result.extractor, ["stub-extractor"]);
   assert.deepEqual(result.warnings, ["llm:failed"]);
-  assert.equal(result.knowledgeCount, 1);
+  assert.equal(result.knowledgeCount, 0, "the fallback extractor is deterministic, so it emits no claims");
 });

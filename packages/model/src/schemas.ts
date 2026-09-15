@@ -111,6 +111,43 @@ export const EvidenceClusterSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
+export const ObservationKindSchema = z.enum([
+  "fixture",
+  "mock",
+  "assertion",
+  "exception",
+  "parametrization",
+  "lifecycle",
+  "environment",
+  "test_location",
+  "dependency",
+  "run_instruction",
+  "history",
+]);
+
+/**
+ * A deterministic projection of evidence: mechanically true, so it carries no review
+ * status and can never go stale. Computed on read from persisted evidence, never stored.
+ */
+export const ObservationSchema = z.object({
+  id: z.string().min(1),
+  repo: z.string().min(1),
+  revision: z.string().min(1),
+  sourceType: EvidenceTypeSchema,
+  kind: ObservationKindSchema,
+  subject: z.string().default(""),
+  predicate: z.string().min(1),
+  statement: z.string().min(1),
+  detail: z.record(z.unknown()).default({}),
+  sourceRef: z.string().min(1),
+  lineStart: z.number().int().positive(),
+  lineEnd: z.number().int().positive(),
+  evidenceIds: z.array(z.string().min(1)).min(1),
+  extractor: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  createdAt: z.string().datetime(),
+});
+
 export const ObservedFactsSchema = z.object({
   assertions: z.array(z.string()).default([]),
   expectedExceptions: z.array(z.string()).default([]),
@@ -272,6 +309,7 @@ export const ContextPackSchema = z.object({
   knowledge: z.array(KnowledgeCardSchema),
   evidence: z.array(EvidenceSchema),
   evidenceClusters: z.array(EvidenceClusterSchema),
+  observations: z.array(ObservationSchema).default([]),
   relations: z.array(KnowledgeRelationSchema),
   impactSummary: z.object({
     changedFiles: z.array(z.string()),
@@ -464,6 +502,56 @@ export const EvaluationObservationSchema = RecordEvaluationObservationRequestSch
   recordedAt: z.string().datetime(),
 });
 
+export const RunDispositionSchema = z.enum(["done", "failed", "skipped"]);
+
+export const RunStageSchema = z.enum([
+  "scan",
+  "source_evidence",
+  "project_evidence",
+  "partition",
+  "knowledge_extraction",
+  "rule_extraction",
+  "cluster_materialization",
+  "card_materialization",
+  "relations",
+  "index_rebuild",
+]);
+
+export const RunErrorCodeSchema = z.enum(["timeout", "http_4xx", "http_5xx", "parse", "unknown"]);
+
+/** Execution-level record: one row per stage attempt. Persisted the moment the stage ends so a crash still leaves a trace. */
+export const ExecutionRunSchema = z.object({
+  id: z.string().min(1),
+  repo: z.string().min(1),
+  revision: z.string().min(1),
+  stage: RunStageSchema,
+  extractor: z.string().min(1),
+  fingerprint: z.string().min(1),
+  disposition: RunDispositionSchema,
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime(),
+  durationMs: z.number().nonnegative(),
+  attempt: z.number().int().nonnegative().default(1),
+  errorCode: RunErrorCodeSchema.nullable().default(null),
+  errorMessage: z.string().default(""),
+  counts: z.record(z.number().int().nonnegative()).default({}),
+  warnings: z.array(z.string()).default([]),
+});
+
+/** Item-level record: one row per provider, shard, draft or index unit inside a stage. */
+export const RunItemSchema = z.object({
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  itemKey: z.string().min(1),
+  itemKind: z.enum(["provider", "shard", "draft", "evidence", "index"]),
+  disposition: RunDispositionSchema,
+  attempt: z.number().int().nonnegative().default(1),
+  durationMs: z.number().nonnegative().default(0),
+  errorCode: RunErrorCodeSchema.nullable().default(null),
+  errorMessage: z.string().default(""),
+  createdAt: z.string().datetime(),
+});
+
 export const ConflictRequestSchema = z.object({
   leftKnowledgeId: z.string().min(1),
   rightKnowledgeId: z.string().min(1),
@@ -573,6 +661,8 @@ export type BuildResult = {
 
 export type Evidence = z.infer<typeof EvidenceSchema>;
 export type EvidenceCluster = z.infer<typeof EvidenceClusterSchema>;
+export type Observation = z.infer<typeof ObservationSchema>;
+export type ObservationKind = z.infer<typeof ObservationKindSchema>;
 export type ObservedFacts = z.infer<typeof ObservedFactsSchema>;
 export type Applicability = z.infer<typeof ApplicabilitySchema>;
 export type KnowledgeCard = z.infer<typeof KnowledgeCardSchema>;
@@ -591,6 +681,11 @@ export type CreateEvaluationPlanRequest = z.infer<typeof CreateEvaluationPlanReq
 export type EvaluationPlan = z.infer<typeof EvaluationPlanSchema>;
 export type RecordEvaluationObservationRequest = z.infer<typeof RecordEvaluationObservationRequestSchema>;
 export type EvaluationObservation = z.infer<typeof EvaluationObservationSchema>;
+export type RunDisposition = z.infer<typeof RunDispositionSchema>;
+export type RunStage = z.infer<typeof RunStageSchema>;
+export type RunErrorCode = z.infer<typeof RunErrorCodeSchema>;
+export type ExecutionRun = z.infer<typeof ExecutionRunSchema>;
+export type RunItem = z.infer<typeof RunItemSchema>;
 export type EvaluationRunManifest = {
   protocolVersion: "evaluation.v2";
   planId: string;

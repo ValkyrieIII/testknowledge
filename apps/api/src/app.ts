@@ -53,6 +53,8 @@ export function createApp(engine = createEngine()): FastifyInstance {
   });
   app.get("/api/knowledge", async () => engine.listKnowledge());
   app.get<{ Querystring: { knowledgeId?: string } }>("/api/knowledge-changes", async (request) => engine.listKnowledgeChanges(request.query.knowledgeId));
+  app.get<{ Querystring: { repo?: string; revision?: string } }>("/api/runs", async (request) => engine.listExtractionRuns(request.query.repo, request.query.revision));
+  app.get<{ Params: { id: string } }>("/api/runs/:id/items", async (request) => engine.listRunItems(request.params.id));
   app.get<{ Querystring: { repo?: string } }>("/api/clusters", async (request) => engine.listClusters(request.query.repo));
   app.post("/api/knowledge", async (request, reply) => {
     if (writing) return reply.code(409).send({ error: "构建或审核正在进行，请完成后重试。" });

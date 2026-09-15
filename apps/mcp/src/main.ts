@@ -93,6 +93,13 @@ server.registerTool("list_test_evidence_clusters", {
   annotations: readOnly,
 }, async ({ repo }) => result(await engine.listClusters(repo)));
 
+server.registerTool("list_extraction_runs", {
+  title: "List extraction run records",
+  description: "Read the durable per-stage execution ledger: which pipeline stage ran, how it ended (done/failed/skipped), and what it counted. Pass runId for the item-level ledger of one run.",
+  inputSchema: z.object({ repo: z.string().optional(), revision: z.string().optional(), runId: z.string().optional() }),
+  annotations: readOnly,
+}, async ({ repo, revision, runId }) => result(runId ? await engine.listRunItems(runId) : await engine.listExtractionRuns(repo, revision)));
+
 server.registerTool("build_test_knowledge", {
   title: "Build test knowledge from a repository",
   description: "Statically scan sources and update local evidence, cards, relations, and indexes. Does not execute tests.",

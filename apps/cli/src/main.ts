@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { mkdir, readFile } from "node:fs/promises";
 import { BuildRequestSchema, ConflictRequestSchema, ContextRequestSchema, CreateEvaluationPlanRequestSchema, CreateKnowledgeBatchRequestSchema, CreateKnowledgeRequestSchema, EvidenceTypeSchema, FeedbackRequestSchema, MergeKnowledgeRequestSchema, RecordEvaluationObservationRequestSchema, ResolveConflictRequestSchema, ReviewRequestSchema, RollbackKnowledgeRequestSchema, VerificationRequestSchema } from "@testknowledge/model";
-import { KnowledgeEngine } from "@testknowledge/core";
+import { KnowledgeEngine, planExtractionShards } from "@testknowledge/core";
 import { createDefaultEngine, MultiFrameworkProjectScanner, resolveDataRoot, resolveInvocationPath } from "@testknowledge/adapters";
 
 function engine(): KnowledgeEngine {
@@ -102,6 +102,35 @@ program.command("history")
   .option("--id <knowledge-id>")
   .action(async (options: { id?: string }) => {
     console.log(JSON.stringify(await engine().listKnowledgeChanges(options.id), null, 2));
+  });
+
+program.command("runs")
+  .option("--repo <path>")
+  .option("--revision <revision>")
+  .option("--run-id <run-id>", "print the item ledger for one run")
+  .action(async (options: { repo?: string; revision?: string; runId?: string }) => {
+    const instance = engine();
+    const result = options.runId
+      ? await instance.listRunItems(options.runId)
+      : await instance.listExtractionRuns(options.repo ? resolveInvocationPath(options.repo) : undefined, options.revision);
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+program.command("extract-plan")
+  .requiredOption("--repo <path>")
+  .description("preview how stored evidence would be partitioned for extraction; makes no model calls")
+  .action(async (options: { repo: string }) => {
+    const repo = resolveInvocationPath(options.repo);
+    const evidence = await engine().listEvidence(repo);
+    const shards = planExtractionShards(evidence, { repo });
+    console.log(JSON.stringify({
+      repo,
+      evidenceCount: evidence.length,
+      shardCount: shards.length,
+      estimatedInputTokens: shards.reduce((total, shard) => total + shard.estimatedInputTokens, 0),
+      maxOutputTokens: shards.reduce((total, shard) => total + shard.maxOutputTokens, 0),
+      shards,
+    }, null, 2));
   });
 
 program.command("rollback")
