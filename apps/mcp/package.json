@@ -1,0 +1,17 @@
+{
+  "name": "@testknowledge/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@testknowledge/adapters": "workspace:*",
+    "@testknowledge/core": "workspace:*",
+    "@testknowledge/model": "workspace:*",
+    "zod": "^3.25.76"
+  }
+}

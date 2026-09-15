@@ -1,8 +1,7 @@
 node_modules/
 dist/
 .codegraph/
-.testknowledge/index.sqlite3
-.testknowledge/*.tmp
+.testknowledge/
 .env
 .env.local
 key.md

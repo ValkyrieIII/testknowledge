@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "pnpm --filter @testknowledge/model build && pnpm --filter @testknowledge/core build && pnpm --filter @testknowledge/adapters build && pnpm --filter @testknowledge/api build && pnpm --filter @testknowledge/cli build && pnpm --filter @testknowledge/web build",
+    "build": "pnpm --filter @testknowledge/model build && pnpm --filter @testknowledge/core build && pnpm --filter @testknowledge/adapters build && pnpm --filter @testknowledge/api build && pnpm --filter @testknowledge/cli build && pnpm --filter @testknowledge/mcp build && pnpm --filter @testknowledge/web build",
     "lint": "eslint apps packages",
     "test": "pnpm build && pnpm -r --if-present test",
     "typecheck": "pnpm build && pnpm -r typecheck"
