@@ -62,6 +62,7 @@ import type {
   SourceSpec,
   StructuralContextProvider,
 } from "./ports.js";
+import { documentedRunInstructions } from "./run-instructions.js";
 
 const isoNow = (): string => new Date().toISOString();
 
@@ -452,28 +453,26 @@ function isApplicable(card: KnowledgeCard, request: ContextRequest): boolean {
 
 function runInstructionsFromEvidence(evidence: Evidence[]): ContextPack["runInstructions"] {
   return evidence.flatMap((item) => {
-    const command = item.payload.runCommand ?? item.payload.command;
-    const commands = item.payload.runCommands;
-    const profile = item.payload.environmentProfile !== null && typeof item.payload.environmentProfile === "object" ? item.payload.environmentProfile as Record<string, unknown> : {};
-    const workingDirectories = Array.isArray(profile.workingDirectories) ? profile.workingDirectories.filter((entry): entry is string => typeof entry === "string") : [];
-    const workingDirectory = workingDirectories[0];
-    const detailed = Array.isArray(profile.runInstructions) ? profile.runInstructions.flatMap((entry) => {
-      if (entry === null || typeof entry !== "object") return [];
-      const instruction = entry as Record<string, unknown>;
-      if (typeof instruction.commandText !== "string" || !instruction.commandText) return [];
-      return [{
-        commandText: instruction.commandText,
-        sourceRef: item.sourceRef,
-        ...(typeof instruction.workingDirectory === "string" && instruction.workingDirectory ? { workingDirectory: instruction.workingDirectory } : {}),
-        confidence: item.confidence,
-        verified: false,
-      }];
-    }) : [];
-    const structured = Array.isArray(command) && command.every((part) => typeof part === "string")
-      ? [{ command: command as string[], sourceRef: item.sourceRef, ...(workingDirectory ? { workingDirectory } : {}), confidence: item.confidence, verified: item.sourceType === "execution_result" && item.payload.outcome === "passed" }]
+    const executed = item.payload.runCommand ?? item.payload.command;
+    const structured = Array.isArray(executed) && executed.every((part) => typeof part === "string")
+      ? [{ command: executed as string[], sourceRef: item.sourceRef, confidence: item.confidence, verified: item.sourceType === "execution_result" && item.payload.outcome === "passed" }]
       : [];
-    const documented = detailed.length > 0 ? detailed : Array.isArray(commands) ? commands.filter((entry): entry is string => typeof entry === "string").map((commandText) => ({ commandText, sourceRef: item.sourceRef, ...(workingDirectory ? { workingDirectory } : {}), confidence: item.confidence, verified: false })) : [];
-    return [...structured, ...documented];
+    const paired = documentedRunInstructions(item.payload.environmentProfile).map((instruction) => ({
+      commandText: instruction.commandText,
+      sourceRef: item.sourceRef,
+      ...(instruction.workingDirectory ? { workingDirectory: instruction.workingDirectory } : {}),
+      confidence: item.confidence,
+      verified: false,
+    }));
+    // A command the source never paired with a directory is still a documented command, so keep it;
+    // leaving workingDirectory unset is the honest answer, attaching an unrelated directory is not.
+    const unpaired = paired.length > 0 ? [] : stringValues(item.payload.runCommands).map((commandText) => ({
+      commandText,
+      sourceRef: item.sourceRef,
+      confidence: item.confidence,
+      verified: false,
+    }));
+    return [...structured, ...paired, ...unpaired];
   });
 }
 

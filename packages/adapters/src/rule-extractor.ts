@@ -1,5 +1,6 @@
 import type { Evidence, TestTechnique } from "@testknowledge/model";
 import type { CandidateExtractor, KnowledgeDraft, ProjectScope } from "@testknowledge/core";
+import { runInstructionTexts } from "@testknowledge/core";
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -19,20 +20,6 @@ function textList(value: unknown): string[] {
 
 function factList(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object") : [];
-}
-
-/** Preserve the command-to-working-directory relationship recorded by the environment adapter. */
-function runInstructionTexts(profile: Record<string, unknown>): string[] {
-  return [...new Set(factList(profile.runInstructions).flatMap((instruction) => {
-    const command = typeof instruction.commandText === "string" && instruction.commandText.trim()
-      ? instruction.commandText.trim()
-      : Array.isArray(instruction.command) && instruction.command.every((part): part is string => typeof part === "string")
-        ? instruction.command.join(" ").trim()
-        : "";
-    if (!command) return [];
-    const workingDirectory = typeof instruction.workingDirectory === "string" ? instruction.workingDirectory.trim() : "";
-    return [workingDirectory ? `命令：${command}（工作目录：${workingDirectory}）` : `命令：${command}`];
-  }))];
 }
 
 /** Exception types the test expects: `with pytest.raises(E)` and `try/except E`. */
