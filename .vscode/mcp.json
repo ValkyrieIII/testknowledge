@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "testknowledge": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/apps/mcp/dist/main.js"
+      ],
+      "env": {
+        "TESTKNOWLEDGE_DATA_ROOT": "${workspaceFolder}/.testknowledge"
+      }
+    }
+  }
+}

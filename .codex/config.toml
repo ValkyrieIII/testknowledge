@@ -1,0 +1,10 @@
+[mcp_servers.testknowledge]
+command = "pnpm"
+args = ["--filter", "@testknowledge/mcp", "start"]
+cwd = "."
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+default_tools_approval_mode = "writes"
+
+[mcp_servers.testknowledge.env]
+TESTKNOWLEDGE_DATA_ROOT = ".testknowledge"

@@ -1,0 +1,82 @@
+{
+  "repo": "D:\\projects\\qqbot",
+  "revision": "d3c3af603373a220dc8e2bc51dd7eba51cb9212f6ad498fff17db57947dc433d",
+  "model": "gpt-5.5",
+  "promptTemplate": "在固定仓库修订的隔离工作区中，为给定目标补充高价值测试。先检查生产代码和已有测试，避免重复；覆盖任务声明的边界与 Oracle，只断言可观察行为。不得修改生产行为来迎合测试。使用允许的工具，并在结束时报告新增测试、执行结果、命中的边界与 Oracle、无效断言、重复测试、脆弱测试、Token、工具调用和耗时。A 只使用普通代码工具；B 额外使用 CodeGraph；C 额外先调用 get_test_context，并只把 reviewed/verified 知识当作可靠项目经验。",
+  "tools": [
+    "read_file",
+    "search_files",
+    "edit_file",
+    "run_isolated_test",
+    "codegraph_explore",
+    "get_test_context"
+  ],
+  "variantTools": {
+    "A_ordinary_agent": ["read_file", "search_files", "edit_file", "run_isolated_test"],
+    "B_codegraph": ["read_file", "search_files", "edit_file", "run_isolated_test", "codegraph_explore"],
+    "C_codegraph_testknowledge": ["read_file", "search_files", "edit_file", "run_isolated_test", "codegraph_explore", "get_test_context"]
+  },
+  "budget": {
+    "maxTokens": 12000,
+    "maxToolCalls": 30,
+    "maxDurationMs": 900000
+  },
+  "tasks": [
+    {
+      "id": "qqbot-recorder-overload",
+      "prompt": "为 EventRecorder.try_record 补充测试，重点验证观测热路径在未启动、队列有空间和队列已满时的行为。",
+      "targetSymbols": ["EventRecorder", "try_record"],
+      "changedFiles": ["backend/bot/observability/recorder.py"],
+      "criticalBoundaryIds": ["recorder-not-accepting", "recorder-capacity-minus-one", "recorder-capacity-full"],
+      "seededBugIds": [],
+      "requiredOracleIds": ["try-record-return-value", "dropped-counter-exact", "accepted-counter-exact", "non-blocking-enqueue"],
+      "fixtureMockCriteria": ["inject-observable-writer", "do-not-use-real-database"],
+      "duplicateCriteria": ["不得仅复制或改名已有的满队列测试", "相同输入和相同 Oracle 只计一个有效场景"],
+      "brittlenessCriteria": ["不得依赖后台任务的未公开字段布局", "非阻塞性必须用有界时间或 put_nowait 可观察事实判断"]
+    },
+    {
+      "id": "qqbot-readiness-isolation",
+      "prompt": "为 readiness、check_database 和 check_onebot 补充测试，验证依赖分别失败时总体状态和两个子状态。",
+      "targetSymbols": ["readiness", "check_database", "check_onebot"],
+      "changedFiles": ["backend/bot/observability/system.py"],
+      "criticalBoundaryIds": ["database-down-onebot-ready", "database-ready-onebot-down", "both-ready"],
+      "seededBugIds": [],
+      "requiredOracleIds": ["overall-ready-derived", "database-status-preserved", "onebot-status-preserved", "stable-error-codes"],
+      "fixtureMockCriteria": ["inject-database-check", "inject-onebot-check", "no-live-onebot-or-database"],
+      "duplicateCriteria": ["数据库失败和 OneBot 失败必须是不同分区，不得重复同一依赖失败"],
+      "brittlenessCriteria": ["不得断言依赖检查的内部调用顺序", "不得依赖真实网络或数据库时序"]
+    },
+    {
+      "id": "qqbot-migration-idempotence",
+      "prompt": "为 request_log_migration_plan 补充测试，覆盖旧模式、目标模式、同列不同索引名以及已有索引名称的组合。",
+      "targetSymbols": ["request_log_migration_plan"],
+      "changedFiles": ["backend/bot/observability/migration.py"],
+      "criticalBoundaryIds": ["legacy-integer-columns", "missing-error-code", "equivalent-index-columns", "complete-target-schema"],
+      "seededBugIds": [],
+      "requiredOracleIds": ["ddl-set-for-legacy-schema", "empty-plan-for-target-schema", "no-duplicate-index-ddl"],
+      "fixtureMockCriteria": ["use-schema-metadata-values", "do-not-connect-real-database"],
+      "duplicateCriteria": ["同一 schema 组合和同一 DDL Oracle 不得换名重复"],
+      "brittlenessCriteria": ["不得断言无关 DDL 字符串空白或内部列表构造顺序", "应验证语义上的索引列与幂等结果"]
+    },
+    {
+      "id": "qqbot-observability-privacy",
+      "prompt": "为 ObservabilityEvent 和 to_record 补充测试，验证状态、error_code 和持久化映射的隐私边界。",
+      "targetSymbols": ["ObservabilityEvent", "EventStatus", "to_record"],
+      "changedFiles": ["backend/bot/observability/events.py"],
+      "criticalBoundaryIds": ["supported-status", "unknown-status", "retired-notfound", "raw-error-text", "structured-error-code"],
+      "seededBugIds": [],
+      "requiredOracleIds": ["duration-renamed", "error-message-null", "no-message-text-field", "invalid-values-rejected"],
+      "fixtureMockCriteria": [],
+      "duplicateCriteria": ["状态拒绝和原始错误文本拒绝必须对应不同输入分区"],
+      "brittlenessCriteria": ["不得断言 dataclass 或字典的内部字段遍历顺序", "只验证公开映射和隐私字段边界"]
+    }
+  ],
+  "acceptance": {
+    "minimumCompleteTasks": 4,
+    "minimumTaskWinRate": 0.75,
+    "maximumTaskLossRate": 0,
+    "maximumTokenIncreaseRatio": 0.5,
+    "maximumToolCallIncreaseRatio": 0.5,
+    "maximumDurationIncreaseRatio": 0.5
+  }
+}
