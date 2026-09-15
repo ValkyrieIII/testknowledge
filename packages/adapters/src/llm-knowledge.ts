@@ -38,13 +38,14 @@ function textList(value: unknown): string[] {
 /** Compact, deterministic view of an evidence item for the prompt. */
 function factsOf(evidence: Evidence): Record<string, unknown> {
   const payload = evidence.payload;
+  const content = typeof evidence.content === "string" ? evidence.content : "";
   const exceptions = [
     ...objectList(payload.withBlocks).filter((item) => typeof item.call === "string" && /raises/u.test(item.call)).flatMap((item) => stringList(item.args)),
     ...objectList(payload.tryHandlers).flatMap((item) => stringList(item.exceptionTypes)),
     ...stringList(payload.expectedExceptions),
   ];
   return {
-    sourceExcerpt: evidence.content.slice(0, 4000),
+    sourceExcerpt: content.slice(0, 4000),
     assertions: textList(payload.assertions),
     expectedExceptions: [...new Set(exceptions)],
     language: typeof payload.language === "string" ? payload.language : "",
