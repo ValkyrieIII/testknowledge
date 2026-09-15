@@ -21,6 +21,20 @@ function factList(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object") : [];
 }
 
+/** Preserve the command-to-working-directory relationship recorded by the environment adapter. */
+function runInstructionTexts(profile: Record<string, unknown>): string[] {
+  return [...new Set(factList(profile.runInstructions).flatMap((instruction) => {
+    const command = typeof instruction.commandText === "string" && instruction.commandText.trim()
+      ? instruction.commandText.trim()
+      : Array.isArray(instruction.command) && instruction.command.every((part): part is string => typeof part === "string")
+        ? instruction.command.join(" ").trim()
+        : "";
+    if (!command) return [];
+    const workingDirectory = typeof instruction.workingDirectory === "string" ? instruction.workingDirectory.trim() : "";
+    return [workingDirectory ? `命令：${command}（工作目录：${workingDirectory}）` : `命令：${command}`];
+  }))];
+}
+
 /** Exception types the test expects: `with pytest.raises(E)` and `try/except E`. */
 function exceptionExpectations(payload: Record<string, unknown>): string[] {
   const fromWith = factList(payload.withBlocks)
@@ -110,17 +124,26 @@ export class RuleCandidateExtractor implements CandidateExtractor {
         const profile = payload.environmentProfile as Record<string, unknown>;
         const commands = stringList(profile.runCommands);
         const workingDirectories = stringList(profile.workingDirectories);
+        const runInstructions = runInstructionTexts(profile);
         const envNames = stringList(profile.environmentVariableNames);
         const serviceImages = stringList(profile.serviceImages);
-        if (commands.length + workingDirectories.length + envNames.length + serviceImages.length > 0) {
+        if (runInstructions.length + commands.length + workingDirectories.length + envNames.length + serviceImages.length > 0) {
+          const environmentStatement = runInstructions.length > 0
+            ? `运行指令：${runInstructions.join("；")}`
+            : [
+              commands.length ? `命令（未配对）：${commands.join("；")}` : "",
+              workingDirectories.length ? `工作目录（未配对）：${workingDirectories.join("、")}` : "",
+            ].filter(Boolean).join("；");
           drafts.push({
             kind: "environment",
             title: `${item.path} 的测试环境约束`,
-            statement: [commands.length ? `命令：${commands.join("；")}` : "", workingDirectories.length ? `工作目录：${workingDirectories.join("、")}` : "", envNames.length ? `环境变量名：${envNames.join("、")}` : "", serviceImages.length ? `服务镜像：${serviceImages.join("、")}` : ""].filter(Boolean).join("；"),
+            statement: [environmentStatement, envNames.length ? `环境变量名：${envNames.join("、")}` : "", serviceImages.length ? `服务镜像：${serviceImages.join("、")}` : ""].filter(Boolean).join("；"),
             trigger: "准备或运行该项目测试时参考",
             expectedBehavior: "按来源文件记录的命令和环境约束准备测试，不推断未记录的变量值",
             oracle: "实际运行结果必须由外部隔离 runner 或 CI 另行回写",
-            risk: "这是静态配置事实，不证明环境当前可用",
+            risk: runInstructions.length > 0
+              ? "这是静态配置事实，不证明环境当前可用"
+              : "这是静态配置事实，不证明环境当前可用；来源未提供逐条命令与工作目录配对",
             path: item.path,
             symbol: "",
             targetSymbols: [], partitions: [], preconditions: envNames, dependencies: serviceImages,

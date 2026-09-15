@@ -11,7 +11,7 @@ lint、类型检查或编译通过当成功能正确性证明。
 | 定位目标代码和影响范围 | `StructuralContextProvider` 接入 CodeGraph；Context Pack 返回目标来源、相关路径与 abstention | 工程链路已实现；QQBot `try_record` 查询已得到目标与影响上下文 |
 | 找到现有测试、fixture、factory 和运行方式 | Python AST 抽取测试、fixture、显式 Factory、mock、断言与 marker；项目地图和 Context Pack 返回现有测试及带来源的未验证命令 | 静态链路已实现；命令未被冒充为已执行 |
 | 返回带证据的边界、风险、Oracle 和历史缺陷 | KnowledgeCard 强制 Evidence 引用，Git/Issue/测试代码分别进入证据层 | 工程链路已实现；QQBot 有 14 张当前候选卡待人工审核 |
-| 区分 verified、candidate、stale | 生命周期、证据变更失效、人工审核、执行验证、冲突、合并、回滚和 Oracle 反证均有独立入口与审计 | 已实现；当前 QQBot 为 45 candidate、38 stale、0 verified |
+| 区分 verified、candidate、stale | 生命周期、证据变更失效、人工审核、执行验证、冲突、合并、回滚和 Oracle 反证均有独立入口与审计 | 已实现；当前 QQBot 为 45 candidate、45 stale、0 verified |
 | 无可靠知识时安全回退 | 默认只消费 reviewed/verified，冲突和不适用卡被过滤，无可用知识返回 `ordinary_agent` 与 abstention | QQBot 静态查询已有回退证据 |
 | C 的行为质量优于仅代码上下文 B | v2 已冻结同模型、完整提示、逐变体工具、预算、任务和评分条件；`runSetId` 防止跨批次拼接 | **未证明**：没有获授权的隔离执行、预埋缺陷和逐项观察 |
 
