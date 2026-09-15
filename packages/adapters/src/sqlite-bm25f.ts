@@ -16,6 +16,8 @@ export class SqliteBm25fIndex implements SearchIndex {
 
   private ensureSchema(db: DatabaseSync): void {
     db.exec("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, repo TEXT NOT NULL, revision TEXT NOT NULL, status TEXT NOT NULL, symbol TEXT NOT NULL, path TEXT NOT NULL)");
+    db.exec("CREATE TABLE IF NOT EXISTS card_targets (id TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY (id, target))");
+    db.exec("CREATE INDEX IF NOT EXISTS card_targets_target ON card_targets (target)");
     db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(id UNINDEXED, symbol, path, title, trigger_text, statement, expected_behavior, oracle)");
   }
 
@@ -25,18 +27,21 @@ export class SqliteBm25fIndex implements SearchIndex {
     try {
       this.ensureSchema(db);
       db.exec("DELETE FROM cards");
+      db.exec("DELETE FROM card_targets");
       db.exec("DELETE FROM cards_fts");
       const cardStmt = db.prepare("INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?)");
+      const targetStmt = db.prepare("INSERT INTO card_targets VALUES (?, ?)");
       const ftsStmt = db.prepare("INSERT INTO cards_fts VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       for (const card of cards) {
         cardStmt.run(card.id, card.repo, card.revision, card.status, card.symbol, card.path);
+        for (const target of new Set([card.symbol, ...card.targetSymbols, ...card.applicability.symbols].filter(Boolean))) targetStmt.run(card.id, target);
         ftsStmt.run(
           card.id,
           searchableText(card.symbol),
           searchableText(card.path),
           searchableText(card.title),
           searchableText(card.trigger),
-          searchableText(card.statement, ...(card.observed ? Object.values(card.observed).flat() : [])),
+          searchableText(card.statement, ...card.techniques, ...(card.observed ? Object.values(card.observed).flat() : [])),
           searchableText(card.expectedBehavior),
           searchableText(card.oracle),
         );
@@ -63,16 +68,27 @@ export class SqliteBm25fIndex implements SearchIndex {
     const db = new DatabaseSync(this.path);
     try {
       this.ensureSchema(db);
-      const statuses = options.includeCandidates ? ["verified", "candidate"] : ["verified"];
+      const statuses = options.includeCandidates ? ["reviewed", "verified", "candidate"] : ["reviewed", "verified"];
       const statusPlaceholders = statuses.map(() => "?").join(",");
       const exact = new Map<string, RetrievalHit>();
-      const exactValues = [...new Set([...options.targetSymbols, ...options.changedFiles])];
-      if (exactValues.length) {
-        const placeholders = exactValues.map(() => "?").join(",");
-        const rows = db.prepare(`SELECT id,repo,revision,status,symbol,path FROM cards WHERE repo=? AND ${options.revision ? "revision=? AND " : ""} status IN (${statusPlaceholders}) AND (symbol IN (${placeholders}) OR path IN (${placeholders}))`).all(options.repo, ...(options.revision ? [options.revision] : []), ...statuses, ...exactValues, ...exactValues) as unknown as CardRow[];
-        for (const row of rows) {
-          exact.set(row.id, { id: row.id, channels: ["exact"], matchedFields: [row.symbol && options.targetSymbols.includes(row.symbol) ? "symbol" : "path"], score: 1 });
-        }
+      const addExact = (row: CardRow, field: string, score: number): void => {
+        const old = exact.get(row.id);
+        exact.set(row.id, old ? { ...old, matchedFields: [...new Set([...old.matchedFields, field])], score: Math.max(old.score, score) } : { id: row.id, channels: ["exact"], matchedFields: [field], score });
+      };
+      const commonArgs = [options.repo, ...(options.revision ? [options.revision] : []), ...statuses];
+      if (options.targetSymbols.length > 0) {
+        const symbols = [...new Set(options.targetSymbols)];
+        const placeholders = symbols.map(() => "?").join(",");
+        const directRows = db.prepare(`SELECT id,repo,revision,status,symbol,path FROM cards WHERE repo=? AND ${options.revision ? "revision=? AND " : ""} status IN (${statusPlaceholders}) AND symbol IN (${placeholders})`).all(...commonArgs, ...symbols) as unknown as CardRow[];
+        for (const row of directRows) addExact(row, "symbol", 1.2);
+        const targetRows = db.prepare(`SELECT DISTINCT c.id,c.repo,c.revision,c.status,c.symbol,c.path FROM cards c JOIN card_targets t ON t.id=c.id WHERE c.repo=? AND ${options.revision ? "c.revision=? AND " : ""} c.status IN (${statusPlaceholders}) AND t.target IN (${placeholders})`).all(...commonArgs, ...symbols) as unknown as CardRow[];
+        for (const row of targetRows) addExact(row, "targetSymbols", 1.1);
+      }
+      if (options.changedFiles.length > 0) {
+        const paths = [...new Set(options.changedFiles)];
+        const placeholders = paths.map(() => "?").join(",");
+        const pathRows = db.prepare(`SELECT id,repo,revision,status,symbol,path FROM cards WHERE repo=? AND ${options.revision ? "revision=? AND " : ""} status IN (${statusPlaceholders}) AND path IN (${placeholders})`).all(...commonArgs, ...paths) as unknown as CardRow[];
+        for (const row of pathRows) addExact(row, "path", 1);
       }
       const expression = queryExpression(query);
       const lexical = new Map<string, RetrievalHit>();

@@ -40,6 +40,7 @@ export type PythonFunctionFacts = {
 };
 
 const MOCK_NAME = /(?:^|\.)(?:patch|Mock|MagicMock)$/u;
+const FACTORY_NAME = /(?:^|\.)(?:[A-Z]\w*Factory|[a-z_]\w*_factory)(?:\.(?:build|build_batch|create|create_batch))?$/u;
 
 function childNodes(node: PyNode): PyNode[] {
   const out: PyNode[] = [];
@@ -303,4 +304,9 @@ export function extractFunctions(text: string): PythonFunctionFacts[] {
 
 export function isMockCall(name: string): boolean {
   return MOCK_NAME.test(name);
+}
+
+/** Conservative factory recognition: explicit Factory classes or *_factory helpers only. */
+export function isFactoryCall(name: string): boolean {
+  return FACTORY_NAME.test(name);
 }

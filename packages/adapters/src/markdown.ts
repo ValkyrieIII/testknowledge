@@ -38,6 +38,10 @@ export class MarkdownAdapter implements SourceAdapter {
       lineStart: start,
       lineEnd: end,
       contentHash,
+      extractedAt: new Date().toISOString(),
+      extractor: this.id,
+      content: snippet,
+      confidence: 1,
       payload: { snippet, format: "markdown" },
     };
   }

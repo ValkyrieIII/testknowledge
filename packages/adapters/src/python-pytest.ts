@@ -14,7 +14,7 @@ import {
   type SourceAdapter,
   type SourceFile,
 } from "@testknowledge/core";
-import { extractFunctions, isMockCall } from "./python-facts.js";
+import { extractFunctions, isFactoryCall, isMockCall } from "./python-facts.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -55,7 +55,7 @@ async function readPytestConfig(repo: string): Promise<PytestConfig> {
 }
 
 export class PythonPytestAdapter implements SourceAdapter {
-  readonly id = "source.python-pytest.lezer-v3";
+  readonly id = "source.python-pytest.lezer-v4";
 
   private readonly configCache = new Map<string, PytestConfig>();
 
@@ -64,7 +64,7 @@ export class PythonPytestAdapter implements SourceAdapter {
   }
 
   supports(file: SourceFile): boolean {
-    return file.type === "test_code" || file.type === "production_code" || file.path.endsWith(".py");
+    return file.path.endsWith(".py") && (file.type === "test_code" || file.type === "production_code");
   }
 
   private async configFor(repo: string): Promise<PytestConfig> {
@@ -82,6 +82,7 @@ export class PythonPytestAdapter implements SourceAdapter {
     const sourceType = isTestModule || isConftest ? "test_code" : file.type;
     const lines = file.text.split("\n");
     const result: Evidence[] = [];
+    const extractedAt = new Date().toISOString();
     const add = (symbol: string, start: number, end: number, payload: Record<string, unknown>): void => {
       const snippet = lines.slice(start - 1, end).join("\n");
       const contentHash = hash(snippet);
@@ -96,7 +97,11 @@ export class PythonPytestAdapter implements SourceAdapter {
         lineStart: start,
         lineEnd: end,
         contentHash,
-        payload: { ...payload, snippet },
+        extractedAt,
+        extractor: this.id,
+        content: snippet,
+        confidence: 1,
+        payload: { language: "python", framework: isTestModule || isConftest ? "pytest" : "", ...payload, snippet },
       });
     };
     add("", 1, Math.max(1, lines.length), {
@@ -112,6 +117,7 @@ export class PythonPytestAdapter implements SourceAdapter {
       const isTest = isTestModule && isTestFunctionName(fn.name, config) && (fn.enclosingClass === "" || inTestClass);
       const parametrized = new Set(parametrizedNames(fn.decorators));
       const mocks = [...fn.calls, ...fn.decorators].map((item) => item.name).filter(isMockCall);
+      const factories = fn.calls.map((item) => item.name).filter(isFactoryCall);
       add(fn.name, fn.lineStart, fn.lineEnd, {
         isTest,
         isFixture,
@@ -128,6 +134,7 @@ export class PythonPytestAdapter implements SourceAdapter {
         tryHandlers: fn.tryHandlers,
         fixtureRequests: fn.parameters.map((parameter) => parameter.name).filter((name) => !parametrized.has(name)),
         mocks: [...new Set(mocks)],
+        factories: [...new Set(factories)],
       });
     }
     return result;
