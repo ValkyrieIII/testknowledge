@@ -22,12 +22,14 @@ import { FileLlmResponseCache } from "./llm-response-cache.js";
 import { MarkdownAdapter } from "./markdown.js";
 import { PythonPytestAdapter } from "./python-pytest.js";
 import { RuleCandidateExtractor } from "./rule-extractor.js";
+import { SettingsStore, liveLlmConfig, settingsFilePath } from "./settings.js";
 import { SqliteBm25fIndex } from "./sqlite-bm25f.js";
 import { TestEnvironmentAdapter } from "./test-environment.js";
 
 export type DefaultEngineOptions = {
   dataRoot?: string;
   environment?: NodeJS.ProcessEnv;
+  settings?: SettingsStore;
   repository?: KnowledgeRepository;
   searchIndex?: SearchIndex;
   sourceAdapters?: SourceAdapter[];
@@ -58,24 +60,22 @@ export function createDefaultEngine(options: DefaultEngineOptions = {}): Knowled
   const repository = options.repository ?? new JsonlRepository(dataRoot);
   const searchIndex = options.searchIndex ?? new SqliteBm25fIndex(join(dataRoot, "index.sqlite3"));
   const ruleExtractor = options.ruleExtractor ?? new RuleCandidateExtractor();
-  const configuredLlm = environment.TESTKNOWLEDGE_LLM_BASE_URL && environment.TESTKNOWLEDGE_LLM_API_KEY && environment.TESTKNOWLEDGE_LLM_MODEL
-    ? new LlmKnowledgeExtractor({
-      baseUrl: environment.TESTKNOWLEDGE_LLM_BASE_URL,
-      apiKey: environment.TESTKNOWLEDGE_LLM_API_KEY,
-      model: environment.TESTKNOWLEDGE_LLM_MODEL,
-      cache: new FileLlmResponseCache(join(dataRoot, "llm-cache")),
-    })
-    : undefined;
+  const settings = options.settings ?? new SettingsStore(settingsFilePath(dataRoot), environment);
+  // The extractor is always wired: its settings may be completed after startup, and the engine
+  // asks it whether it is ready before spending a build on it.
+  const llmExtractor = options.llmExtractor === null
+    ? undefined
+    : options.llmExtractor ?? new LlmKnowledgeExtractor(liveLlmConfig(settings, new FileLlmResponseCache(join(dataRoot, "llm-cache"))));
   return new KnowledgeEngine(
     repository,
     searchIndex,
     options.sourceAdapters ?? defaultSourceAdapters(),
     ruleExtractor,
-    options.llmExtractor === null ? undefined : options.llmExtractor ?? configuredLlm,
+    llmExtractor,
     options.structuralContextProvider === null ? undefined : options.structuralContextProvider ?? new CodeGraphCliStructuralProvider(),
     options.projectEvidenceProviders ?? [new GitHistoryEvidenceProvider()],
     // Repository reads are only useful to a model-directed extractor, so the runtime follows the
-    // extractor: without credentials nothing is exposed and the build stays repository-determined.
-    options.evidenceToolRuntime === null ? undefined : options.evidenceToolRuntime ?? (configuredLlm ? new RepoEvidenceToolRuntime() : undefined),
+    // extractor rather than the presence of credentials.
+    options.evidenceToolRuntime === null ? undefined : options.evidenceToolRuntime ?? (llmExtractor ? new RepoEvidenceToolRuntime() : undefined),
   );
 }

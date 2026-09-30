@@ -16,4 +16,5 @@ export * from "./multi-framework-project-scanner.js";
 export * from "./python-pytest.js";
 export * from "./pytest-project-scanner.js";
 export * from "./rule-extractor.js";
+export * from "./settings.js";
 export * from "./sqlite-bm25f.js";

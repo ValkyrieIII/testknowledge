@@ -81,6 +81,11 @@ Git 历史适配器读取最近 100 条提交，只把提交说明中带明确�
 同一抽取器版本、端点、模型、生成参数和证据消息使用内容哈希缓存；缓存不包含 API Key，且只有可解析的
 JSON 响应才写入 `.testknowledge/llm-cache/`。证据或模型配置变化会自然产生新键，不覆盖旧响应。
 
+这三项配置也会持久化到 `.testknowledge/settings.json`（首次写入时权限为 0600），环境变量优先于文件，
+因此一次性实验仍可用环境变量覆盖。`GET /api/settings` 只回显端点和模型，以及是否已保存 Key；
+`PATCH /api/settings` 写文件，省略的字段保留原值，`apiKey: ""` 表示清除。配置在每次请求时读取，
+保存后下一次构建即生效，不需要重启进程。文件缺失或格式损坏时按未配置处理，不影响服务启动。
+
 Context 请求包含 `languages`、`frameworks`、可选版本、目标符号和变更文件。调用方未指定语言和框架时，
 优先使用当前项目地图的检测结果；没有项目地图时才回退 Python/pytest。
 核心编译器会再次执行 applicability 硬过滤；请求显式提供的目标符号或路径若与卡片冲突，该卡不会注入。
@@ -142,6 +147,7 @@ Web 知识区默认显示“当前 Agent 待审”，只包含当前身份为 `c
 ├─ reviews.jsonl     # 审核轨迹
 ├─ knowledge-changes.jsonl # 变更前后快照、操作分组和回滚审计
 ├─ project-maps.jsonl # 当前仓库版本的测试项目地图
+├─ settings.json     # 持久化的 LLM 端点与模型；唯一存放凭据的文件
 ├─ evaluation-plans.jsonl # 冻结的 A/B/C 任务、模型、工具、预算和阈值
 ├─ evaluation-observations.jsonl # 外部执行证据绑定的逐任务观察
 ├─ llm-cache/        # 内容寻址的可解析模型响应；非权威派生缓存

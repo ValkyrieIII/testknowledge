@@ -634,6 +634,27 @@ export const BuildRequestSchema = z.object({
   useLlm: z.boolean().default(false),
 });
 
+/** Endpoint credentials. An omitted field keeps the stored value; an empty api key clears it. */
+export const LlmSettingsPatchSchema = z.object({
+  baseUrl: z.string().trim().url().optional(),
+  apiKey: z.string().trim().optional(),
+  model: z.string().trim().min(1).optional(),
+});
+
+/** The persisted settings document, which is also the shape of a settings update. */
+export const SettingsPatchSchema = z.object({
+  llm: LlmSettingsPatchSchema.optional(),
+});
+
+export const SettingsViewSchema = z.object({
+  llm: z.object({
+    baseUrl: z.string(),
+    model: z.string(),
+    hasApiKey: z.boolean(),
+  }),
+  envManaged: z.boolean(),
+});
+
 export type ScanSummary = {
   mode: "auto" | "explicit";
   fileCount: number;
@@ -685,6 +706,8 @@ export type RunStage = z.infer<typeof RunStageSchema>;
 export type RunErrorCode = z.infer<typeof RunErrorCodeSchema>;
 export type ExecutionRun = z.infer<typeof ExecutionRunSchema>;
 export type RunItem = z.infer<typeof RunItemSchema>;
+export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
+export type SettingsView = z.infer<typeof SettingsViewSchema>;
 export type EvaluationRunManifest = {
   protocolVersion: "evaluation.v2";
   planId: string;
@@ -765,3 +788,21 @@ export type TestTechnique = z.infer<typeof TestTechniqueSchema>;
 export type RelationType = z.infer<typeof RelationTypeSchema>;
 export type RelationNode = z.infer<typeof RelationNodeSchema>;
 export type KnowledgeRelation = z.infer<typeof KnowledgeRelationSchema>;
+
+/** Bounded list response used by the web client so large repositories never become one DOM list. */
+export type KnowledgePage = {
+  items: KnowledgeCard[];
+  total: number;
+  offset: number;
+  limit: number;
+  counts: Record<KnowledgeStatus, number> & { total: number };
+};
+
+/** History rows deliberately omit embedded before/after card snapshots. */
+export type KnowledgeChangeSummary = Omit<KnowledgeChange, "before" | "after">;
+export type KnowledgeChangePage = {
+  items: KnowledgeChangeSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+};

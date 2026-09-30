@@ -3,9 +3,11 @@ dist/
 .codegraph/
 .qoder/
 .testknowledge/
+.tk-llm-verify/
 .env
 .env.local
 key.md
 .venv/
 .ruff_cache/
 __pycache__/
+meetings/

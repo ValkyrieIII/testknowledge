@@ -224,3 +224,22 @@ test("falling back to rule extraction yields observations, not cards", async () 
   assert.deepEqual(result.warnings, ["llm:failed"]);
   assert.equal(result.knowledgeCount, 0, "the fallback extractor is deterministic, so it emits no claims");
 });
+
+test("an extractor that reports itself unready is never asked to run", async () => {
+  const repository = new MemoryRepository();
+  let calls = 0;
+  const llm = {
+    id: "llm",
+    isReady: () => false,
+    extract: async () => {
+      calls += 1;
+      return [];
+    },
+  };
+  const engine = new KnowledgeEngine(repository, noopIndex, [new StubAdapter()], new StubExtractor(), llm);
+  const result = await engine.build({ repo: "/r", files: [fileA("A1")], useLlm: true });
+
+  assert.equal(calls, 0);
+  assert.deepEqual(result.extractor, ["stub-extractor"]);
+  assert.deepEqual(result.warnings, ["llm:unconfigured"]);
+});

@@ -32,7 +32,10 @@ import {
   type FeedbackRequest,
   type KnowledgeCard,
   type KnowledgeChange,
+  type KnowledgeChangePage,
+  type KnowledgePage,
   type KnowledgeRelation,
+  type KnowledgeStatus,
   type ProjectMap,
   MergeKnowledgeRequestSchema,
   type MergeKnowledgeRequest,
@@ -109,6 +112,11 @@ export type RunTrace = {
 
 function executionRunId(repo: string, revision: string, stage: RunStage, extractor: string, startedAt: string): string {
   return `run_${digest(`${repo}:${revision}:${stage}:${extractor}:${startedAt}`).slice(0, 24)}`;
+}
+
+/** A configured extractor can become unconfigured between builds, so availability is asked for. */
+function extractorReady(extractor: CandidateExtractor | undefined): extractor is CandidateExtractor {
+  return extractor !== undefined && (extractor.isReady?.() ?? true);
 }
 
 function runItemRecordId(runId: string, itemKind: string, itemKey: string): string {
@@ -949,12 +957,13 @@ export class KnowledgeEngine {
     for (const adapter of this.sourceAdapters) await adapter.prepare?.(input.repo);
     let revision = digest(input.files.map((file) => `${file.path}:${digest(file.text)}`).sort().join("\n"));
     const scope: ProjectScope = { repo: input.repo, revision };
-    const intendedExtractors = input.useLlm && this.llmExtractor ? [this.llmExtractor.id] : [this.ruleExtractor.id];
+    const llm = extractorReady(this.llmExtractor) ? this.llmExtractor : undefined;
+    const intendedExtractors = input.useLlm && llm ? [llm.id] : [this.ruleExtractor.id];
     let runBase = {
       repo: input.repo,
       revision,
       extractor: intendedExtractors.join("+"),
-      fingerprint: digest(JSON.stringify({ repo: input.repo, revision, extractors: intendedExtractors, useLlm: Boolean(input.useLlm && this.llmExtractor) })),
+      fingerprint: digest(JSON.stringify({ repo: input.repo, revision, extractors: intendedExtractors, useLlm: Boolean(input.useLlm && llm) })),
     };
     const evidence: Evidence[] = [];
     await this.traced("source_evidence", runBase, async (trace) => {
@@ -986,8 +995,7 @@ export class KnowledgeEngine {
     // Production evidence grounds the COVERS relations; it is not a source of test knowledge.
     // Extraction only ever sees evidence that can support a claim.
     const extractionEvidence = evidence.filter(supportsKnowledge);
-    if (input.useLlm && this.llmExtractor) {
-      const llm = this.llmExtractor;
+    if (input.useLlm && llm) {
       try {
         if (isShardedExtractor(llm)) {
           const sharded = await this.extractSharded(llm, extractionEvidence, scope, runBase);
@@ -1715,6 +1723,16 @@ export class KnowledgeEngine {
     return knowledgeId ? changes.filter((change) => change.knowledgeId === knowledgeId) : changes;
   }
 
+  async listKnowledgeChangePage(options: { repo?: string | undefined; offset?: number | undefined; limit?: number | undefined } = {}): Promise<KnowledgeChangePage> {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 50);
+    const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+    const all = (await this.repository.readKnowledgeChanges?.() ?? [])
+      .filter((change) => !options.repo || change.before?.repo === options.repo || change.after?.repo === options.repo)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const items = all.slice(offset, offset + limit).map(({ before: _before, after: _after, ...summary }) => summary);
+    return { items, total: all.length, offset, limit };
+  }
+
   async rollbackKnowledge(id: string, raw: RollbackKnowledgeRequest): Promise<KnowledgeCard[]> {
     const request = RollbackKnowledgeRequestSchema.parse(raw);
     const changes = await this.repository.readKnowledgeChanges?.() ?? [];
@@ -1927,6 +1945,27 @@ export class KnowledgeEngine {
 
   async listKnowledge(): Promise<KnowledgeCard[]> {
     return (await this.repository.readKnowledge()).filter(isKnowledgeLayer);
+  }
+
+  async listKnowledgePage(options: { repo?: string | undefined; status?: KnowledgeStatus | "active" | undefined; offset?: number | undefined; limit?: number | undefined } = {}): Promise<KnowledgePage> {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 12), 1), 50);
+    const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+    const all = (await this.repository.readKnowledge())
+      .filter(isKnowledgeLayer)
+      .filter((card) => !options.repo || card.repo === options.repo)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.title.localeCompare(right.title));
+    const counts = {
+      candidate: all.filter((card) => card.status === "candidate").length,
+      reviewed: all.filter((card) => card.status === "reviewed").length,
+      verified: all.filter((card) => card.status === "verified").length,
+      rejected: all.filter((card) => card.status === "rejected").length,
+      stale: all.filter((card) => card.status === "stale").length,
+      total: all.length,
+    };
+    const filtered = options.status === "active"
+      ? all.filter((card) => card.status === "reviewed" || card.status === "verified")
+      : options.status ? all.filter((card) => card.status === options.status) : all;
+    return { items: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit, counts };
   }
 
   async getKnowledge(id: string): Promise<KnowledgeCard> {

@@ -1,13 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import type { BuildResult, ContextPack, EvidenceCluster, EvaluationObservation, EvaluationPlan, EvaluationReport, EvaluationVariant, KnowledgeCard, KnowledgeChange, KnowledgeRelation, ProjectMap, RelationType } from "@testknowledge/model";
+import type { BuildResult, ContextPack, EvidenceCluster, EvaluationObservation, EvaluationPlan, EvaluationReport, EvaluationVariant, KnowledgeCard, KnowledgeChange, KnowledgeChangePage, KnowledgeChangeSummary, KnowledgePage, KnowledgeRelation, ProjectMap, RelationType } from "@testknowledge/model";
 import EvidenceDetails from "./components/EvidenceDetails.vue";
 import KnowledgeCardView from "./components/KnowledgeCardView.vue";
+import ObservationList from "./components/ObservationList.vue";
+import RunLedgerView from "./components/RunLedgerView.vue";
 import { errorMessage, requestJson } from "./api.js";
 
 const cards = ref<KnowledgeCard[]>([]);
 const clusters = ref<EvidenceCluster[]>([]);
-const changes = ref<KnowledgeChange[]>([]);
+const changes = ref<KnowledgeChangeSummary[]>([]);
+const cardTotal = ref(0);
+const cardCounts = ref<KnowledgePage["counts"]>({ candidate: 0, reviewed: 0, verified: 0, rejected: 0, stale: 0, total: 0 });
+const cardPage = ref(0);
+const cardPageSize = 12;
+const historyTotal = ref(0);
+const historyPage = ref(0);
+const historyPageSize = 20;
+const loadingHistory = ref(false);
 const projectMaps = ref<ProjectMap[]>([]);
 const relations = ref<KnowledgeRelation[]>([]);
 const evaluationPlans = ref<EvaluationPlan[]>([]);
@@ -32,18 +42,13 @@ const governanceReviewer = ref("");
 const reviewNote = ref("");
 const rollbackNote = ref("");
 const reviewNotice = ref("");
-const knowledgeView = ref<"agent_candidates" | "candidates" | "active" | "stale" | "all">("agent_candidates");
-const repoCards = computed(() => repo.value.trim() ? cards.value.filter((card) => card.repo === repo.value.trim()) : cards.value);
-const candidateCount = computed(() => repoCards.value.filter((card) => card.status === "candidate").length);
-const reviewedCount = computed(() => repoCards.value.filter((card) => card.status === "reviewed").length);
-const agentCandidateCount = computed(() => repoCards.value.filter((card) => card.status === "candidate" && card.proposalProvenance.source === "agent").length);
-const visibleCards = computed(() => repoCards.value.filter((card) => {
-  if (knowledgeView.value === "agent_candidates") return card.status === "candidate" && card.proposalProvenance.source === "agent";
-  if (knowledgeView.value === "candidates") return card.status === "candidate";
-  if (knowledgeView.value === "active") return card.status === "reviewed" || card.status === "verified";
-  if (knowledgeView.value === "stale") return card.status === "stale";
-  return true;
-}).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.title.localeCompare(right.title)));
+const knowledgeView = ref<"candidates" | "active" | "stale" | "all">("candidates");
+const candidateCount = computed(() => cardCounts.value.candidate);
+const reviewedCount = computed(() => cardCounts.value.reviewed);
+const visibleCards = computed(() => cards.value);
+const cardPageCount = computed(() => Math.max(1, Math.ceil(cardTotal.value / cardPageSize)));
+const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
+const cardStatus = computed(() => knowledgeView.value === "candidates" ? "candidate" : knowledgeView.value === "active" ? "active" : knowledgeView.value === "stale" ? "stale" : "all");
 const retrievalById = computed(() => new Map(result.value?.retrieval.map((hit) => [hit.id, hit]) ?? []));
 const clusterById = computed(() => new Map(clusters.value.map((cluster) => [cluster.id, cluster])));
 const activeProjectMap = computed(() => projectMaps.value.find((item) => item.repo === repo.value.trim()) ?? projectMaps.value[0]);
@@ -92,9 +97,11 @@ async function scanRepository(): Promise<void> {
     scanResult.value = await requestJson<BuildResult>("/api/build", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repo: repo.value.trim(), useLlm: false }),
+      body: JSON.stringify({ repo: repo.value.trim(), useLlm: true }),
     });
     repo.value = scanResult.value.repo;
+    cardPage.value = 0;
+    historyPage.value = 0;
     result.value = null;
     queryError.value = "";
     reviewNotice.value = "";
@@ -107,23 +114,116 @@ async function scanRepository(): Promise<void> {
   }
 }
 
+function knowledgePageUrl(): string {
+  const params = new URLSearchParams({ offset: String(cardPage.value * cardPageSize), limit: String(cardPageSize) });
+  if (repo.value.trim()) params.set("repo", repo.value.trim());
+  if (cardStatus.value !== "all") params.set("status", cardStatus.value);
+  return `/api/knowledge/page?${params.toString()}`;
+}
+
+async function fetchKnowledgePage(): Promise<KnowledgePage> {
+  return requestJson<KnowledgePage>(knowledgePageUrl());
+}
+
+function applyKnowledgePage(page: KnowledgePage): void {
+  cards.value = page.items;
+  cardTotal.value = page.total;
+  cardCounts.value = page.counts;
+  if (cardPage.value >= cardPageCount.value) cardPage.value = Math.max(0, cardPageCount.value - 1);
+}
+
+async function loadKnowledgePage(): Promise<void> {
+  if (loadingCards.value) return;
+  loadingCards.value = true;
+  listError.value = "";
+  try {
+    const page = await fetchKnowledgePage();
+    const requestedPage = cardPage.value;
+    applyKnowledgePage(page);
+    if (!page.items.length && page.total > 0 && cardPage.value !== requestedPage) applyKnowledgePage(await fetchKnowledgePage());
+  } catch (cause) {
+    listError.value = errorMessage(cause);
+  } finally {
+    loadingCards.value = false;
+  }
+}
+
+function historyPageUrl(): string {
+  const params = new URLSearchParams({ offset: String(historyPage.value * historyPageSize), limit: String(historyPageSize) });
+  if (repo.value.trim()) params.set("repo", repo.value.trim());
+  return `/api/knowledge-changes/page?${params.toString()}`;
+}
+
+async function fetchHistoryPage(): Promise<KnowledgeChangePage> {
+  return requestJson<KnowledgeChangePage>(historyPageUrl());
+}
+
+async function loadHistoryPage(): Promise<void> {
+  if (loadingHistory.value) return;
+  loadingHistory.value = true;
+  try {
+    const page = await fetchHistoryPage();
+    const requestedPage = historyPage.value;
+    changes.value = page.items;
+    historyTotal.value = page.total;
+    if (historyPage.value >= historyPageCount.value) historyPage.value = Math.max(0, historyPageCount.value - 1);
+    if (!page.items.length && page.total > 0 && historyPage.value !== requestedPage) {
+      const retry = await fetchHistoryPage();
+      changes.value = retry.items;
+      historyTotal.value = retry.total;
+    }
+  } catch (cause) {
+    listError.value = errorMessage(cause);
+  } finally {
+    loadingHistory.value = false;
+  }
+}
+
+async function changeCardPage(delta: number): Promise<void> {
+  const next = cardPage.value + delta;
+  if (loadingCards.value || next < 0 || next >= cardPageCount.value) return;
+  cardPage.value = next;
+  await loadKnowledgePage();
+}
+
+async function changeHistoryPage(delta: number): Promise<void> {
+  const next = historyPage.value + delta;
+  if (loadingHistory.value || next < 0 || next >= historyPageCount.value) return;
+  historyPage.value = next;
+  await loadHistoryPage();
+}
+
+function changeKnowledgeView(): void {
+  cardPage.value = 0;
+  void loadKnowledgePage();
+}
+
+function changeRepository(): void {
+  cardPage.value = 0;
+  historyPage.value = 0;
+  void Promise.all([loadKnowledgePage(), loadHistoryPage()]);
+}
+
 async function loadCards(): Promise<void> {
   if (loadingCards.value || reviewing.value.size > 0 || reviewingClusters.value.size > 0 || rollingBack.value.size > 0) return;
   loadingCards.value = true;
   listError.value = "";
   try {
-    const [nextCards, nextClusters, nextChanges, nextProjectMaps, nextRelations, nextEvaluationPlans, nextEvaluationObservations] = await Promise.all([
-      requestJson<KnowledgeCard[]>("/api/knowledge"),
+    const [nextKnowledgePage, nextClusters, nextProjectMaps, nextRelations, nextEvaluationPlans, nextEvaluationObservations] = await Promise.all([
+      fetchKnowledgePage(),
       requestJson<EvidenceCluster[]>("/api/clusters"),
-      requestJson<KnowledgeChange[]>("/api/knowledge-changes"),
       requestJson<ProjectMap[]>("/api/project-maps"),
       requestJson<KnowledgeRelation[]>("/api/relations"),
       requestJson<EvaluationPlan[]>("/api/evaluations"),
       requestJson<EvaluationObservation[]>("/api/evaluation-observations"),
     ]);
-    cards.value = nextCards;
+    let page = nextKnowledgePage;
+    if (!repo.value && page.items[0]) {
+      repo.value = page.items[0].repo;
+      page = await fetchKnowledgePage();
+    }
+    applyKnowledgePage(page);
     clusters.value = nextClusters;
-    changes.value = nextChanges;
     projectMaps.value = nextProjectMaps;
     relations.value = nextRelations;
     evaluationPlans.value = nextEvaluationPlans;
@@ -139,7 +239,7 @@ async function loadCards(): Promise<void> {
       const query = selected ? `?runSetId=${encodeURIComponent(selected)}` : "";
       return [plan.id, await requestJson<EvaluationReport>(`/api/evaluations/${encodeURIComponent(plan.id)}/report${query}`)];
     })));
-    if (!repo.value && cards.value[0]) repo.value = cards.value[0].repo;
+    await loadHistoryPage();
   } catch (cause) {
     listError.value = errorMessage(cause);
   } finally {
@@ -168,7 +268,7 @@ function runInstructionText(item: ProjectMap["runInstructions"][number]): string
   return item.command?.join(" ") ?? item.commandText ?? "";
 }
 
-async function rollback(change: KnowledgeChange): Promise<void> {
+async function rollback(change: KnowledgeChangeSummary): Promise<void> {
   const reviewer = governanceReviewer.value.trim();
   const note = rollbackNote.value.trim();
   if (!reviewer || !note || rollingBack.value.has(change.operationId)) return;
@@ -184,7 +284,7 @@ async function rollback(change: KnowledgeChange): Promise<void> {
     reviewNotice.value = "操作已回滚；恢复的知识卡已重新进入待审核状态。";
     rollbackNote.value = "";
     rollingBack.value.delete(change.operationId);
-    await loadCards();
+    await Promise.all([loadKnowledgePage(), loadHistoryPage()]);
   } catch (cause) {
     listError.value = errorMessage(cause);
   } finally {
@@ -214,6 +314,8 @@ async function reviewCluster(cluster: EvidenceCluster, status: "reviewed" | "rej
     if (status === "rejected") cards.value = cards.value.map((card) => card.clusterId === cluster.id ? { ...card, status: "rejected" } : card);
     reviewNotice.value = status === "reviewed" ? "证据分组已确认；其知识卡仍需独立审核。" : "证据分组及其生成卡片已拒绝。";
     reviewNote.value = "";
+    reviewingClusters.value.delete(cluster.id);
+    await Promise.all([loadKnowledgePage(), loadHistoryPage()]);
   } catch (cause) {
     listError.value = errorMessage(cause);
   } finally {
@@ -262,6 +364,8 @@ async function review(card: KnowledgeCard, status: "reviewed" | "rejected"): Pro
     reviewNotice.value = "「" + card.title + "」" + (status === "reviewed" ? "已完成人工审核，尚未获得执行验证。" : "已拒绝。")
       + (result.value ? "重新检索可更新召回结果。" : "");
     reviewNote.value = "";
+    reviewing.value.delete(card.id);
+    await Promise.all([loadKnowledgePage(), loadHistoryPage()]);
   } catch (cause) {
     reviewErrors.value[card.id] = errorMessage(cause);
   } finally {
@@ -310,7 +414,7 @@ onMounted(loadCards);
           class="workspace-stats"
           aria-label="全部知识卡片统计"
         >
-          <div><dt>知识卡片</dt><dd>{{ loadingCards || listError ? '—' : repoCards.length.toString().padStart(2, '0') }}</dd></div>
+          <div><dt>知识卡片</dt><dd>{{ loadingCards || listError ? '—' : cardCounts.total.toString().padStart(2, '0') }}</dd></div>
           <div><dt>待审核</dt><dd>{{ loadingCards || listError ? '—' : candidateCount.toString().padStart(2, '0') }}</dd></div>
           <div><dt>已审核</dt><dd>{{ loadingCards || listError ? '—' : reviewedCount.toString().padStart(2, '0') }}</dd></div>
         </dl>
@@ -341,6 +445,7 @@ onMounted(loadCards);
             required
             spellcheck="false"
             placeholder="例如 D:\projects\your-project"
+            @change="changeRepository"
           >
           <div
             class="scan-controls"
@@ -457,7 +562,7 @@ onMounted(loadCards);
         </div>
         <div v-else-if="result">
           <div class="result-summary">
-            <p>任务 · {{ result.request.task }}</p><span>{{ result.knowledge.length }} 张卡片 · {{ result.evidenceClusters.length }} 个分组 · {{ result.evidence.length }} 条证据 · {{ result.relations.length }} 条关系</span>
+            <p>任务 · {{ result.request.task }}</p><span>{{ result.knowledge.length }} 张卡片 · {{ result.observations.length }} 条机械事实 · {{ result.evidenceClusters.length }} 个分组 · {{ result.evidence.length }} 条证据 · {{ result.relations.length }} 条关系</span>
           </div>
           <p class="muted">
             影响范围来源 · {{ result.impactSummary.source }}
@@ -486,6 +591,7 @@ onMounted(loadCards);
               </li>
             </ul>
           </details>
+          <ObservationList :observations="result.observations" />
           <details
             v-if="result.executionSignals.length"
             class="feedback execution-signals"
@@ -556,7 +662,7 @@ onMounted(loadCards);
             <p class="section-index">
               03 / KNOWLEDGE
             </p><h2 id="library-title">
-              项目知识卡片 <span class="heading-count">{{ visibleCards.length }} / {{ repoCards.length }}</span>
+              项目知识卡片 <span class="heading-count">{{ visibleCards.length }} / {{ cardTotal }}</span>
             </h2>
           </div>
           <button
@@ -584,6 +690,7 @@ onMounted(loadCards);
         >
           {{ reviewNotice }}
         </p>
+        <RunLedgerView :repo="repo.trim()" />
         <div class="governance-inputs review-inputs">
           <label>治理人<input
             v-model="governanceReviewer"
@@ -596,15 +703,17 @@ onMounted(loadCards);
         </div>
         <div class="knowledge-filter">
           <label>卡片视图
-            <select v-model="knowledgeView">
-              <option value="agent_candidates">当前 Agent 待审（{{ agentCandidateCount }}）</option>
+            <select
+              v-model="knowledgeView"
+              @change="changeKnowledgeView"
+            >
               <option value="candidates">全部待审（{{ candidateCount }}）</option>
               <option value="active">已审核 / 已验证</option>
               <option value="stale">过期历史</option>
               <option value="all">全部</option>
             </select>
           </label>
-          <span v-if="knowledgeView === 'agent_candidates'">只展示当前身份为 candidate 且由 Agent 起草的卡片；stale 历史不会进入此队列。</span>
+          <span v-if="knowledgeView === 'candidates'">展示所有来源的待审核卡片，包括语义抽取、规则抽取、Agent 起草与人工录入。</span>
         </div>
         <details
           v-if="activeProjectMap"
@@ -719,7 +828,7 @@ onMounted(loadCards);
           <h3>正在读取知识卡片</h3><p>从项目数据中加载已记录的事实。</p>
         </div>
         <div
-          v-else-if="visibleCards.length"
+          v-if="!loadingCards && visibleCards.length"
           class="card-grid"
         >
           <KnowledgeCardView
@@ -734,8 +843,31 @@ onMounted(loadCards);
             @review="review"
           />
         </div>
+        <nav
+          v-if="cardTotal > cardPageSize"
+          class="pagination"
+          aria-label="知识卡片分页"
+        >
+          <button
+            type="button"
+            class="button button-quiet"
+            :disabled="loadingCards || cardPage === 0"
+            @click="changeCardPage(-1)"
+          >
+            上一页
+          </button>
+          <span>第 {{ cardPage + 1 }} / {{ cardPageCount }} 页 · 当前页 {{ visibleCards.length }} 张</span>
+          <button
+            type="button"
+            class="button button-quiet"
+            :disabled="loadingCards || cardPage + 1 >= cardPageCount"
+            @click="changeCardPage(1)"
+          >
+            下一页
+          </button>
+        </nav>
         <div
-          v-else-if="cards.length && !listError"
+          v-if="!loadingCards && !visibleCards.length && cardTotal > 0 && !listError"
           class="empty-state"
         >
           <span
@@ -744,7 +876,7 @@ onMounted(loadCards);
           >∅</span><h3>当前视图没有知识卡</h3><p>可切换卡片视图查看其他状态或来源。</p>
         </div>
         <div
-          v-else-if="!listError"
+          v-if="!loadingCards && !listError && !cardCounts.total"
           class="empty-state"
         >
           <span
@@ -762,7 +894,7 @@ onMounted(loadCards);
             <p class="section-index">
               04 / GOVERNANCE
             </p><h2 id="history-title">
-              版本审计 <span class="heading-count">{{ changes.length }}</span>
+              版本审计 <span class="heading-count">{{ historyTotal }}</span>
             </h2>
           </div>
         </div>
@@ -775,12 +907,19 @@ onMounted(loadCards);
             placeholder="说明为什么恢复这个版本"
           ></label>
         </div>
+        <p
+          v-if="loadingHistory"
+          class="muted"
+          role="status"
+        >
+          正在读取当前页审计记录…
+        </p>
         <div
-          v-if="changes.length"
+          v-if="!loadingHistory && changes.length"
           class="history-list"
         >
           <article
-            v-for="change in [...changes].reverse()"
+            v-for="change in changes"
             :key="change.id"
             class="history-item"
           >
@@ -799,9 +938,32 @@ onMounted(loadCards);
               {{ rollingBack.has(change.operationId) ? '回滚中…' : '回滚此操作' }}
             </button>
           </article>
+          <nav
+            v-if="historyTotal > historyPageSize"
+            class="pagination"
+            aria-label="版本审计分页"
+          >
+            <button
+              type="button"
+              class="button button-quiet"
+              :disabled="loadingHistory || historyPage === 0"
+              @click="changeHistoryPage(-1)"
+            >
+              上一页
+            </button>
+            <span>第 {{ historyPage + 1 }} / {{ historyPageCount }} 页 · 当前页 {{ changes.length }} 条</span>
+            <button
+              type="button"
+              class="button button-quiet"
+              :disabled="loadingHistory || historyPage + 1 >= historyPageCount"
+              @click="changeHistoryPage(1)"
+            >
+              下一页
+            </button>
+          </nav>
         </div>
         <div
-          v-else
+          v-if="!loadingHistory && !changes.length"
           class="empty-state"
         >
           <span

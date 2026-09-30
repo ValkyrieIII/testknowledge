@@ -139,6 +139,11 @@ export class LlmKnowledgeExtractor implements AgenticShardExtractor {
     this.fetchImpl = config.fetch ?? fetch;
   }
 
+  /** Endpoint, key and model are read live, so a partial configuration can be completed at runtime. */
+  isReady(): boolean {
+    return Boolean(this.config.baseUrl && this.config.apiKey && this.config.model);
+  }
+
   /**
    * Opens an agentic turn: the usual per-kind prompt plus the tool protocol, so the model may
    * read the repository before it answers. Everything it reads comes back as evidence.

@@ -97,6 +97,8 @@ export interface ProjectEvidenceProvider {
 
 export interface CandidateExtractor {
   readonly id: string;
+  /** Reported when extraction is attempted; a live configuration may still be incomplete. */
+  isReady?(): boolean;
   extract(evidence: Evidence[], scope: ProjectScope): Promise<CandidateExtractionResult>;
 }
 

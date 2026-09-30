@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { ContextPack, EvidenceClusterStatus, KnowledgeCard, KnowledgeKind, KnowledgeStatus, ObservedFacts, TestTechnique } from "@testknowledge/model";
+import type { ContextPack, EvidenceClusterStatus, KnowledgeCard, KnowledgeKind, KnowledgeStatus, TestTechnique } from "@testknowledge/model";
 import EvidenceDetails from "./EvidenceDetails.vue";
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   card: KnowledgeCard;
   retrieval?: ContextPack["retrieval"][number] | undefined;
   reviewable?: boolean;
@@ -29,18 +28,10 @@ const techniqueNames: Record<TestTechnique, string> = {
   ordering: "顺序", idempotence: "幂等", property_based: "属性测试",
   snapshot_regression: "快照回归", concurrency: "并发", equivalence_assertion: "等价性断言",
 };
-const fields: Array<{ key: keyof ObservedFacts; label: string }> = [
-  { key: "assertions", label: "断言" },
-  { key: "expectedExceptions", label: "预期异常" },
-  { key: "mocks", label: "Mock / Patch" },
-  { key: "factories", label: "Factory" },
-  { key: "dependencies", label: "测试依赖" },
-  { key: "parametrize", label: "参数化" },
-];
-const facts = computed(() => fields.map((field) => ({
-  ...field,
-  values: (props.card.observed?.[field.key] ?? []).filter((value) => value.trim().length > 0),
-})).filter((field) => field.values.length > 0));
+const provenanceNames: Record<KnowledgeCard["proposalProvenance"]["source"], string> = {
+  deterministic_extractor: "规则抽取", llm_extractor: "语义抽取",
+  human: "人工录入", agent: "Agent 起草", unknown: "来源未记录",
+};
 const channelNames = { exact: "精确匹配", bm25f: "文本检索", dense: "语义检索" };
 </script>
 
@@ -101,45 +92,11 @@ const channelNames = { exact: "精确匹配", bm25f: "文本检索", dense: "语
         </div>
       </dl>
     </div>
-    <div class="observed-facts">
-      <div class="facts-heading">
-        <span class="eyebrow">OBSERVED FACTS</span>
-        <span>来源中记录的事实</span>
-      </div>
-      <dl
-        v-if="facts.length"
-        class="fact-list"
-      >
-        <div
-          v-for="field in facts"
-          :key="field.key"
-          class="fact-group"
-        >
-          <dt>{{ field.label }} <span class="fact-count">{{ field.values.length }}</span></dt>
-          <dd>
-            <ul>
-              <li
-                v-for="(value, index) in field.values"
-                :key="index"
-              >
-                <code>{{ value }}</code>
-              </li>
-            </ul>
-          </dd>
-        </div>
-      </dl>
-      <p
-        v-else
-        class="facts-empty"
-      >
-        未记录结构化事实
-      </p>
-    </div>
     <footer class="card-source">
       <dl class="source-fields">
         <div><dt>文件</dt><dd><code>{{ card.path }}</code></dd></div>
         <div><dt>符号</dt><dd><code>{{ card.symbol || "未记录符号" }}</code></dd></div>
-        <div><dt>候选来源</dt><dd><code>{{ card.proposalProvenance.source }} · {{ card.proposalProvenance.actor }}</code></dd></div>
+        <div><dt>候选来源</dt><dd><code>{{ provenanceNames[card.proposalProvenance.source] }} · {{ card.proposalProvenance.actor }}</code></dd></div>
         <div><dt>起草说明</dt><dd>{{ card.proposalProvenance.note }}</dd></div>
         <div v-if="card.clusterId">
           <dt>分组</dt><dd><code>{{ card.clusterId }} · {{ clusterStatus ?? 'missing' }}</code></dd>
