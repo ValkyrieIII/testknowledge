@@ -11,3 +11,4 @@ key.md
 .ruff_cache/
 __pycache__/
 meetings/
+docs/
