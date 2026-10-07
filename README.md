@@ -148,8 +148,6 @@ Web 知识区默认显示“当前 Agent 待审”，只包含当前身份为 `c
 ├─ knowledge-changes.jsonl # 变更前后快照、操作分组和回滚审计
 ├─ project-maps.jsonl # 当前仓库版本的测试项目地图
 ├─ settings.json     # 持久化的 LLM 端点与模型；唯一存放凭据的文件
-├─ evaluation-plans.jsonl # 冻结的 A/B/C 任务、模型、工具、预算和阈值
-├─ evaluation-observations.jsonl # 外部执行证据绑定的逐任务观察
 ├─ llm-cache/        # 内容寻址的可解析模型响应；非权威派生缓存
 ├─ index.sqlite3     # 派生 FTS5 索引
 └─ exports/memory.md  # 面向人的导出内容
@@ -157,25 +155,6 @@ Web 知识区默认显示“当前 Agent 待审”，只包含当前身份为 `c
 
 没有适用的已审核知识时，Context Pack 会返回 `ordinary_agent`，不会注入无来源的通用测试建议。
 
-## A/B/C 行为评估
-
-评估不使用卡片数量或 Recall@K 代替测试质量。先通过 CLI `create-evaluation --input <json>`、HTTP
-`POST /api/evaluations` 或 MCP 冻结仓库版本、模型、提示词、工具、预算、任务和验收阈值；再把外部隔离
-执行产生的 A（普通 Agent）、B（代码图）、C（代码图 + 测试知识）结果作为 `execution_result` Evidence
-导入，并用 `record-evaluation` 记录边界覆盖、预埋缺陷检出、有效 Oracle、fixture/mock、无效断言、重复/脆弱测试及成本。
-
-v2 计划的 `promptHash` 覆盖模板与全部任务提示。执行前用 CLI `evaluation-manifest`、HTTP manifest 入口或
-MCP `get_test_knowledge_evaluation_manifest` 生成逐任务、逐变体规格；反馈与观察必须携带匹配的
-`runSpecHash`。执行器只能把每项的 `agentInput` 交给被评 Agent；同级 `scoring` 只能交给隔离评估器。
-`runSetId` 与任务、变体共同确定运行身份；报告只配对同一运行批次，存在多个批次时必须显式选择，
-不会把各批次的最新结果拼接成看似完整的 A/B/C 比较。同一 `runId` 的观察不可覆盖；相同重试幂等，
-字段变化必须新建运行批次。
-
-`evaluation-report <plan-id>` 只比较 A/B/C 三组结果齐全的配对任务。模型、提示词哈希、工具策略哈希、
-预算与行为阈值全部满足时才返回 `improved`；样本不足返回 `insufficient_data`，其余返回
-`not_demonstrated`。重复与脆弱测试使用任务预先冻结、对被评 Agent 隐藏的评分口径，不能运行后改答案。
-Web 评估面板会同时展示冻结条件、三组样本完整度、行为指标、低质测试计数、C 相对 B 的成本增量
-和未满足条件。系统只接收外部执行证据，不自行运行测试。完整字段见 `docs/evaluation.md`。
 规划逐项证据、当前状态和需要用户参与的门槛见 `docs/completion-audit.md`。
 
 ## 自动扫描项目

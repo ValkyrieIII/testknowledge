@@ -415,92 +415,6 @@ export const RollbackKnowledgeRequestSchema = z.object({
   note: z.string().min(1),
 });
 
-export const EvaluationVariantSchema = z.enum(["A_ordinary_agent", "B_codegraph", "C_codegraph_testknowledge"]);
-export const EvaluationRunSetIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u, "runSetId must be a portable identifier");
-
-export const EvaluationVariantToolsSchema = z.object({
-  A_ordinary_agent: z.array(z.string().min(1)),
-  B_codegraph: z.array(z.string().min(1)),
-  C_codegraph_testknowledge: z.array(z.string().min(1)),
-});
-
-export const EvaluationTaskSchema = z.object({
-  id: z.string().min(1),
-  prompt: z.string().min(1),
-  targetSymbols: z.array(z.string()).default([]),
-  changedFiles: z.array(z.string()).default([]),
-  criticalBoundaryIds: z.array(z.string().min(1)).default([]),
-  seededBugIds: z.array(z.string().min(1)).default([]),
-  requiredOracleIds: z.array(z.string().min(1)).default([]),
-  fixtureMockCriteria: z.array(z.string().min(1)).default([]),
-  duplicateCriteria: z.array(z.string().min(1)).default([]),
-  brittlenessCriteria: z.array(z.string().min(1)).default([]),
-});
-
-export const CreateEvaluationPlanRequestSchema = z.object({
-  repo: z.string().min(1),
-  revision: z.string().min(1),
-  model: z.string().min(1),
-  promptTemplate: z.string().min(1),
-  tools: z.array(z.string().min(1)),
-  variantTools: EvaluationVariantToolsSchema.optional(),
-  budget: z.object({
-    maxTokens: z.number().int().positive(),
-    maxToolCalls: z.number().int().nonnegative(),
-    maxDurationMs: z.number().int().positive(),
-  }),
-  tasks: z.array(EvaluationTaskSchema).min(1),
-  acceptance: z.object({
-    minimumCompleteTasks: z.number().int().positive().default(3),
-    minimumTaskWinRate: z.number().min(0).max(1).default(0.67),
-    maximumTaskLossRate: z.number().min(0).max(1).default(0),
-    maximumTokenIncreaseRatio: z.number().nonnegative().default(0.5),
-    maximumToolCallIncreaseRatio: z.number().nonnegative().default(0.5),
-    maximumDurationIncreaseRatio: z.number().nonnegative().default(0.5),
-  }).default({}),
-});
-
-export const EvaluationPlanSchema = CreateEvaluationPlanRequestSchema.extend({
-  id: z.string().min(1),
-  promptHash: z.string().min(1),
-  toolPolicyHash: z.string().min(1),
-  protocolVersion: z.enum(["evaluation.v1", "evaluation.v2"]).default("evaluation.v1"),
-  status: z.literal("frozen"),
-  createdAt: z.string().datetime(),
-});
-
-export const RecordEvaluationObservationRequestSchema = z.object({
-  planId: z.string().min(1),
-  runSetId: EvaluationRunSetIdSchema,
-  taskId: z.string().min(1),
-  variant: EvaluationVariantSchema,
-  runId: z.string().min(1),
-  model: z.string().min(1),
-  promptHash: z.string().min(1),
-  toolPolicyHash: z.string().min(1),
-  runSpecHash: z.string().min(1),
-  usedTools: z.array(z.string().min(1)),
-  executionPassed: z.boolean(),
-  coveredBoundaryIds: z.array(z.string().min(1)).default([]),
-  detectedSeededBugIds: z.array(z.string().min(1)).default([]),
-  effectiveOracleIds: z.array(z.string().min(1)).default([]),
-  fixtureMockCorrect: z.boolean().nullable().default(null),
-  invalidAssertionCount: z.number().int().nonnegative().default(0),
-  duplicateTestCount: z.number().int().nonnegative(),
-  brittleTestCount: z.number().int().nonnegative(),
-  tokenUsage: z.number().int().nonnegative(),
-  toolCalls: z.number().int().nonnegative(),
-  durationMs: z.number().int().nonnegative(),
-  evidenceIds: z.array(z.string().min(1)).min(1),
-  recordedBy: z.string().min(1),
-  note: z.string().default(""),
-});
-
-export const EvaluationObservationSchema = RecordEvaluationObservationRequestSchema.extend({
-  id: z.string().min(1),
-  recordedAt: z.string().datetime(),
-});
-
 export const RunDispositionSchema = z.enum(["done", "failed", "skipped"]);
 
 export const RunStageSchema = z.enum([
@@ -575,23 +489,6 @@ export const FeedbackRequestSchema = z.object({
   observed: z.string().min(1),
   confidence: z.number().min(0).max(1).default(1),
   execution: ExecutionDetailsSchema.optional(),
-  evaluation: z.object({
-    planId: z.string().min(1),
-    runSetId: EvaluationRunSetIdSchema,
-    taskId: z.string().min(1),
-    variant: EvaluationVariantSchema,
-    runId: z.string().min(1),
-    runSpecHash: z.string().min(1),
-    model: z.string().min(1),
-    promptHash: z.string().min(1),
-    toolPolicyHash: z.string().min(1),
-    usedTools: z.array(z.string().min(1)),
-    tokenUsage: z.number().int().nonnegative(),
-    toolCalls: z.number().int().nonnegative(),
-    durationMs: z.number().int().nonnegative(),
-    duplicateTestCount: z.number().int().nonnegative(),
-    brittleTestCount: z.number().int().nonnegative(),
-  }).optional(),
   oracleAssessment: z.object({
     verdict: z.enum(["supported", "contradicted", "inconclusive"]),
     assessor: z.string().min(1),
@@ -695,12 +592,6 @@ export type CreateKnowledgeRequest = z.infer<typeof CreateKnowledgeRequestSchema
 export type CreateKnowledgeBatchRequest = z.infer<typeof CreateKnowledgeBatchRequestSchema>;
 export type MergeKnowledgeRequest = z.infer<typeof MergeKnowledgeRequestSchema>;
 export type RollbackKnowledgeRequest = z.infer<typeof RollbackKnowledgeRequestSchema>;
-export type EvaluationVariant = z.infer<typeof EvaluationVariantSchema>;
-export type EvaluationTask = z.infer<typeof EvaluationTaskSchema>;
-export type CreateEvaluationPlanRequest = z.infer<typeof CreateEvaluationPlanRequestSchema>;
-export type EvaluationPlan = z.infer<typeof EvaluationPlanSchema>;
-export type RecordEvaluationObservationRequest = z.infer<typeof RecordEvaluationObservationRequestSchema>;
-export type EvaluationObservation = z.infer<typeof EvaluationObservationSchema>;
 export type RunDisposition = z.infer<typeof RunDispositionSchema>;
 export type RunStage = z.infer<typeof RunStageSchema>;
 export type RunErrorCode = z.infer<typeof RunErrorCodeSchema>;
@@ -708,71 +599,6 @@ export type ExecutionRun = z.infer<typeof ExecutionRunSchema>;
 export type RunItem = z.infer<typeof RunItemSchema>;
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
 export type SettingsView = z.infer<typeof SettingsViewSchema>;
-export type EvaluationRunManifest = {
-  protocolVersion: "evaluation.v2";
-  planId: string;
-  runSetId: string;
-  repo: string;
-  revision: string;
-  promptHash: string;
-  toolPolicyHash: string;
-  runs: Array<{
-    planId: string;
-    runSetId: string;
-    taskId: string;
-    variant: EvaluationVariant;
-    runId: string;
-    runSpecHash: string;
-    agentInput: {
-      model: string;
-      prompt: string;
-      tools: string[];
-      budget: EvaluationPlan["budget"];
-      targetSymbols: string[];
-      changedFiles: string[];
-    };
-    scoring: Pick<EvaluationTask, "criticalBoundaryIds" | "seededBugIds" | "requiredOracleIds" | "fixtureMockCriteria" | "duplicateCriteria" | "brittlenessCriteria">;
-  }>;
-};
-export type EvaluationVariantSummary = {
-  taskCount: number;
-  executionPassRate: number;
-  boundaryCoverageRate: number;
-  seededBugDetectionRate: number;
-  effectiveOracleRate: number;
-  fixtureMockCorrectRate: number | null;
-  invalidAssertionCount: number;
-  duplicateTestCount: number;
-  brittleTestCount: number;
-  averageTokens: number;
-  averageToolCalls: number;
-  averageDurationMs: number;
-};
-export type EvaluationReport = {
-  planId: string;
-  runSetId: string | null;
-  availableRunSetIds: string[];
-  completeTaskCount: number;
-  taskWins: number;
-  taskLosses: number;
-  taskTies: number;
-  variants: Record<EvaluationVariant, EvaluationVariantSummary>;
-  deltaCvsB: {
-    boundaryCoverageRate: number;
-    seededBugDetectionRate: number;
-    effectiveOracleRate: number;
-    fixtureMockCorrectRate: number | null;
-    executionPassRate: number;
-    invalidAssertionCount: number;
-    duplicateTestCount: number;
-    brittleTestCount: number;
-    tokenIncreaseRatio: number;
-    toolCallIncreaseRatio: number;
-    durationIncreaseRatio: number;
-  };
-  verdict: "improved" | "not_demonstrated" | "insufficient_data";
-  reasons: string[];
-};
 export type ConflictRequest = z.infer<typeof ConflictRequestSchema>;
 export type ResolveConflictRequest = z.infer<typeof ResolveConflictRequestSchema>;
 export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;

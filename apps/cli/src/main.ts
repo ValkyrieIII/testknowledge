@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { mkdir, readFile } from "node:fs/promises";
-import { BuildRequestSchema, ConflictRequestSchema, ContextRequestSchema, CreateEvaluationPlanRequestSchema, CreateKnowledgeBatchRequestSchema, CreateKnowledgeRequestSchema, EvidenceTypeSchema, FeedbackRequestSchema, MergeKnowledgeRequestSchema, RecordEvaluationObservationRequestSchema, ResolveConflictRequestSchema, ReviewRequestSchema, RollbackKnowledgeRequestSchema, VerificationRequestSchema } from "@testknowledge/model";
+import { BuildRequestSchema, ConflictRequestSchema, ContextRequestSchema, CreateKnowledgeBatchRequestSchema, CreateKnowledgeRequestSchema, EvidenceTypeSchema, FeedbackRequestSchema, MergeKnowledgeRequestSchema, ResolveConflictRequestSchema, ReviewRequestSchema, RollbackKnowledgeRequestSchema, VerificationRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine, planExtractionShards } from "@testknowledge/core";
 import { createDefaultEngine, MultiFrameworkProjectScanner, resolveDataRoot, resolveInvocationPath } from "@testknowledge/adapters";
 
@@ -140,48 +140,10 @@ program.command("rollback")
     console.log(JSON.stringify(await engine().rollbackKnowledge(id, RollbackKnowledgeRequestSchema.parse(await readJson(options.input))), null, 2));
   });
 
-program.command("create-evaluation")
-  .requiredOption("--input <json>", "frozen A/B/C evaluation plan JSON")
-  .action(async (options: { input: string }) => {
-    console.log(JSON.stringify(await engine().createEvaluationPlan(CreateEvaluationPlanRequestSchema.parse(resolveInputRepositoryPaths(await readJson(options.input)))), null, 2));
-  });
-
-program.command("list-evaluations")
-  .action(async () => {
-    console.log(JSON.stringify(await engine().listEvaluationPlans(), null, 2));
-  });
-
-program.command("evaluation-manifest")
-  .argument("<plan-id>")
-  .requiredOption("--run-set <id>", "stable identifier for this A/B/C run set")
-  .action(async (planId: string, options: { runSet: string }) => {
-    console.log(JSON.stringify(await engine().evaluationRunManifest(planId, options.runSet), null, 2));
-  });
-
 program.command("list-project-maps")
   .option("--repo <path>")
   .action(async (options: { repo?: string }) => {
     console.log(JSON.stringify(await engine().listProjectMaps(options.repo ? resolveInvocationPath(options.repo) : undefined), null, 2));
-  });
-
-program.command("list-evaluation-observations")
-  .option("--plan <plan-id>")
-  .option("--run-set <id>")
-  .action(async (options: { plan?: string; runSet?: string }) => {
-    console.log(JSON.stringify(await engine().listEvaluationObservations(options.plan, options.runSet), null, 2));
-  });
-
-program.command("record-evaluation")
-  .requiredOption("--input <json>", "evidence-backed evaluation observation JSON")
-  .action(async (options: { input: string }) => {
-    console.log(JSON.stringify(await engine().recordEvaluationObservation(RecordEvaluationObservationRequestSchema.parse(await readJson(options.input))), null, 2));
-  });
-
-program.command("evaluation-report")
-  .argument("<plan-id>")
-  .option("--run-set <id>", "select one A/B/C run set; required when a plan has multiple run sets")
-  .action(async (planId: string, options: { runSet?: string }) => {
-    console.log(JSON.stringify(await engine().evaluationReport(planId, options.runSet), null, 2));
   });
 
 program.command("record-conflict")

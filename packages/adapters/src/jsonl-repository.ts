@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { EvaluationObservationSchema, EvaluationPlanSchema, ExecutionRunSchema, KnowledgeCardSchema, KnowledgeChangeSchema, ProjectMapSchema, RunItemSchema, type Evidence, type EvidenceCluster, type EvaluationObservation, type EvaluationPlan, type ExecutionRun, type KnowledgeCard, type KnowledgeChange, type KnowledgeRelation, type ProjectMap, type RunItem } from "@testknowledge/model";
+import { ExecutionRunSchema, KnowledgeCardSchema, KnowledgeChangeSchema, ProjectMapSchema, RunItemSchema, type Evidence, type EvidenceCluster, type ExecutionRun, type KnowledgeCard, type KnowledgeChange, type KnowledgeRelation, type ProjectMap, type RunItem } from "@testknowledge/model";
 import type { ClusterReviewRecord, KnowledgeRepository, ReviewRecord } from "@testknowledge/core";
 
 /** Ledgers are read-all-then-rewrite, so retention bounds the rewrite cost. Oldest rows are dropped first. */
@@ -47,8 +47,6 @@ export class JsonlRepository implements KnowledgeRepository {
   private readonly clusterReviewsPath: string;
   private readonly relationsPath: string;
   private readonly knowledgeChangesPath: string;
-  private readonly evaluationPlansPath: string;
-  private readonly evaluationObservationsPath: string;
   private readonly runsPath: string;
   private readonly runItemsPath: string;
   private readonly projectMapsPath: string;
@@ -61,8 +59,6 @@ export class JsonlRepository implements KnowledgeRepository {
     this.clusterReviewsPath = join(root, "cluster-reviews.jsonl");
     this.relationsPath = join(root, "relations.jsonl");
     this.knowledgeChangesPath = join(root, "knowledge-changes.jsonl");
-    this.evaluationPlansPath = join(root, "evaluation-plans.jsonl");
-    this.evaluationObservationsPath = join(root, "evaluation-observations.jsonl");
     this.runsPath = join(root, "runs.jsonl");
     this.runItemsPath = join(root, "run-items.jsonl");
     this.projectMapsPath = join(root, "project-maps.jsonl");
@@ -111,24 +107,6 @@ export class JsonlRepository implements KnowledgeRepository {
     if (records.length === 0) return;
     const existing = await this.readKnowledgeChanges();
     await writeJsonlAtomic(this.knowledgeChangesPath, [...existing, ...records]);
-  }
-
-  async readEvaluationPlans(): Promise<EvaluationPlan[]> {
-    return (await readJsonl<unknown>(this.evaluationPlansPath)).map((row) => EvaluationPlanSchema.parse(row));
-  }
-
-  async writeEvaluationPlans(plans: EvaluationPlan[]): Promise<void> {
-    await writeJsonlAtomic(this.evaluationPlansPath, plans);
-  }
-
-  async readEvaluationObservations(): Promise<EvaluationObservation[]> {
-    return (await readJsonl<unknown>(this.evaluationObservationsPath)).map((row) => EvaluationObservationSchema.parse(row));
-  }
-
-  async appendEvaluationObservation(observation: EvaluationObservation): Promise<void> {
-    const existing = await this.readEvaluationObservations();
-    if (existing.some((item) => item.id === observation.id)) throw new Error(`Evaluation observation already exists: ${observation.id}`);
-    await writeJsonlAtomic(this.evaluationObservationsPath, [...existing, observation]);
   }
 
   async readRuns(): Promise<ExecutionRun[]> {

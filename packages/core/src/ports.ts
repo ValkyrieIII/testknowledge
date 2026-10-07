@@ -11,8 +11,6 @@ import type {
   Applicability,
   ScanSummary,
   ContextRequest,
-  EvaluationPlan,
-  EvaluationObservation,
   ExecutionRun,
   RunItem,
   ProjectMap,
@@ -204,10 +202,6 @@ export interface KnowledgeRepository {
   appendReview(record: ReviewRecord): Promise<void>;
   appendClusterReview?(record: ClusterReviewRecord): Promise<void>;
   appendKnowledgeChanges?(records: KnowledgeChange[]): Promise<void>;
-  readEvaluationPlans?(): Promise<EvaluationPlan[]>;
-  writeEvaluationPlans?(plans: EvaluationPlan[]): Promise<void>;
-  readEvaluationObservations?(): Promise<EvaluationObservation[]>;
-  appendEvaluationObservation?(observation: EvaluationObservation): Promise<void>;
   readRuns?(): Promise<ExecutionRun[]>;
   appendRun?(record: ExecutionRun): Promise<void>;
   readRunItems?(runId?: string): Promise<RunItem[]>;

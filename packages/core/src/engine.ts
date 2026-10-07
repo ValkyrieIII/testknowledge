@@ -6,8 +6,6 @@ import {
   type BuildRequest,
   type BuildResult,
   ContextRequestSchema,
-  CreateEvaluationPlanRequestSchema,
-  type CreateEvaluationPlanRequest,
   ConflictRequestSchema,
   type ConflictRequest,
   CreateKnowledgeBatchRequestSchema,
@@ -18,14 +16,6 @@ import {
   type ContextRequest,
   type Evidence,
   type EvidenceCluster,
-  type EvaluationObservation,
-  type EvaluationPlan,
-  type EvaluationReport,
-  type EvaluationRunManifest,
-  EvaluationRunSetIdSchema,
-  type EvaluationTask,
-  type EvaluationVariant,
-  type EvaluationVariantSummary,
   ExecutionDetailsSchema,
   type ExecutionRun,
   FeedbackRequestSchema,
@@ -43,8 +33,6 @@ import {
   type ReviewRequest,
   RollbackKnowledgeRequestSchema,
   type RollbackKnowledgeRequest,
-  RecordEvaluationObservationRequestSchema,
-  type RecordEvaluationObservationRequest,
   ResolveConflictRequestSchema,
   type ResolveConflictRequest,
   type RunDisposition,
@@ -645,85 +633,6 @@ function materializeProjectMap(
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
   };
-}
-
-const EVALUATION_VARIANTS: EvaluationVariant[] = ["A_ordinary_agent", "B_codegraph", "C_codegraph_testknowledge"];
-
-function expectedMatches(observed: string[], expected: string[]): number {
-  const expectedSet = new Set(expected);
-  return new Set(observed.filter((id) => expectedSet.has(id))).size;
-}
-
-function evaluationSummary(rows: Array<{ task: EvaluationTask; observation: EvaluationObservation }>): EvaluationVariantSummary {
-  const count = rows.length;
-  const total = (field: "criticalBoundaryIds" | "seededBugIds" | "requiredOracleIds"): number => rows.reduce((sum, row) => sum + row.task[field].length, 0);
-  const matched = (observed: "coveredBoundaryIds" | "detectedSeededBugIds" | "effectiveOracleIds", expected: "criticalBoundaryIds" | "seededBugIds" | "requiredOracleIds"): number => rows.reduce((sum, row) => sum + expectedMatches(row.observation[observed], row.task[expected]), 0);
-  const ratio = (numerator: number, denominator: number): number => denominator === 0 ? 0 : numerator / denominator;
-  const fixtureRows = rows.filter((row) => row.task.fixtureMockCriteria.length > 0 && row.observation.fixtureMockCorrect !== null);
-  return {
-    taskCount: count,
-    executionPassRate: ratio(rows.filter((row) => row.observation.executionPassed).length, count),
-    boundaryCoverageRate: ratio(matched("coveredBoundaryIds", "criticalBoundaryIds"), total("criticalBoundaryIds")),
-    seededBugDetectionRate: ratio(matched("detectedSeededBugIds", "seededBugIds"), total("seededBugIds")),
-    effectiveOracleRate: ratio(matched("effectiveOracleIds", "requiredOracleIds"), total("requiredOracleIds")),
-    fixtureMockCorrectRate: fixtureRows.length === 0 ? null : fixtureRows.filter((row) => row.observation.fixtureMockCorrect === true).length / fixtureRows.length,
-    invalidAssertionCount: rows.reduce((sum, row) => sum + row.observation.invalidAssertionCount, 0),
-    duplicateTestCount: rows.reduce((sum, row) => sum + row.observation.duplicateTestCount, 0),
-    brittleTestCount: rows.reduce((sum, row) => sum + row.observation.brittleTestCount, 0),
-    averageTokens: ratio(rows.reduce((sum, row) => sum + row.observation.tokenUsage, 0), count),
-    averageToolCalls: ratio(rows.reduce((sum, row) => sum + row.observation.toolCalls, 0), count),
-    averageDurationMs: ratio(rows.reduce((sum, row) => sum + row.observation.durationMs, 0), count),
-  };
-}
-
-function taskQuality(task: EvaluationTask, observation: EvaluationObservation): number {
-  const scores = [observation.executionPassed ? 1 : 0];
-  if (task.criticalBoundaryIds.length > 0) scores.push(expectedMatches(observation.coveredBoundaryIds, task.criticalBoundaryIds) / task.criticalBoundaryIds.length);
-  if (task.seededBugIds.length > 0) scores.push(expectedMatches(observation.detectedSeededBugIds, task.seededBugIds) / task.seededBugIds.length);
-  if (task.requiredOracleIds.length > 0) scores.push(expectedMatches(observation.effectiveOracleIds, task.requiredOracleIds) / task.requiredOracleIds.length);
-  if (task.fixtureMockCriteria.length > 0 && observation.fixtureMockCorrect !== null) scores.push(observation.fixtureMockCorrect ? 1 : 0);
-  const lowQualityCount = observation.invalidAssertionCount + observation.duplicateTestCount + observation.brittleTestCount;
-  return scores.reduce((sum, score) => sum + score, 0) / scores.length - Math.min(1, lowQualityCount) * 0.25;
-}
-
-function increaseRatio(candidate: number, baseline: number): number {
-  return (candidate - baseline) / Math.max(1, baseline);
-}
-
-function sameStringSet(left: string[], right: string[]): boolean {
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.length === sortedRight.length && sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
-function evaluationRunSpec(plan: EvaluationPlan, task: EvaluationTask, variant: EvaluationVariant, runSetId: string): EvaluationRunManifest["runs"][number] {
-  const tools = plan.variantTools?.[variant] ?? plan.tools;
-  const prompt = `${plan.promptTemplate.trim()}\n\n## 当前任务\n\n${task.prompt.trim()}`;
-  const runId = `evalrun_${digest(JSON.stringify({ planId: plan.id, runSetId, taskId: task.id, variant })).slice(0, 24)}`;
-  const base = {
-    planId: plan.id,
-    runSetId,
-    taskId: task.id,
-    variant,
-    runId,
-    agentInput: {
-      model: plan.model,
-      prompt,
-      tools: [...tools],
-      budget: { ...plan.budget },
-      targetSymbols: [...task.targetSymbols],
-      changedFiles: [...task.changedFiles],
-    },
-    scoring: {
-      criticalBoundaryIds: [...task.criticalBoundaryIds],
-      seededBugIds: [...task.seededBugIds],
-      requiredOracleIds: [...task.requiredOracleIds],
-      fixtureMockCriteria: [...task.fixtureMockCriteria],
-      duplicateCriteria: [...task.duplicateCriteria],
-      brittlenessCriteria: [...task.brittlenessCriteria],
-    },
-  };
-  return { ...base, runSpecHash: digest(JSON.stringify(base)) };
 }
 
 export class KnowledgeEngine {
@@ -1348,186 +1257,9 @@ export class KnowledgeEngine {
     };
   }
 
-  async createEvaluationPlan(raw: CreateEvaluationPlanRequest): Promise<EvaluationPlan> {
-    const request = CreateEvaluationPlanRequestSchema.parse(raw);
-    const taskIds = request.tasks.map((task) => task.id);
-    if (new Set(taskIds).size !== taskIds.length) throw new Error("Evaluation task IDs must be unique within a plan");
-    const frozen = { ...request, repo: resolve(request.repo) };
-    const promptHash = digest(JSON.stringify({ promptTemplate: frozen.promptTemplate, tasks: frozen.tasks.map((task) => ({ id: task.id, prompt: task.prompt })) }));
-    const toolPolicy = frozen.variantTools
-      ? Object.fromEntries(Object.entries(frozen.variantTools).sort(([left], [right]) => left.localeCompare(right)).map(([variant, tools]) => [variant, [...tools].sort()]))
-      : { shared: [...frozen.tools].sort() };
-    const toolPolicyHash = digest(JSON.stringify(toolPolicy));
-    const protocolVersion = "evaluation.v2" as const;
-    const id = `eval_${digest(JSON.stringify({ ...frozen, promptHash, toolPolicyHash, protocolVersion })).slice(0, 24)}`;
-    const existing = await this.repository.readEvaluationPlans?.() ?? [];
-    const current = existing.find((plan) => plan.id === id);
-    if (current) return current;
-    const plan: EvaluationPlan = { ...frozen, id, promptHash, toolPolicyHash, protocolVersion, status: "frozen", createdAt: isoNow() };
-    if (!this.repository.writeEvaluationPlans) throw new Error("Evaluation plan storage is not configured");
-    await this.repository.writeEvaluationPlans([...existing, plan]);
-    return plan;
-  }
-
-  async listEvaluationPlans(): Promise<EvaluationPlan[]> {
-    return await this.repository.readEvaluationPlans?.() ?? [];
-  }
-
-  async evaluationRunManifest(planId: string, rawRunSetId: string): Promise<EvaluationRunManifest> {
-    const runSetId = EvaluationRunSetIdSchema.parse(rawRunSetId);
-    const plan = (await this.repository.readEvaluationPlans?.() ?? []).find((item) => item.id === planId);
-    if (!plan) throw new Error(`Unknown evaluation plan: ${planId}`);
-    if (plan.protocolVersion !== "evaluation.v2") throw new Error("Legacy evaluation plans cannot produce integrity-bound run manifests");
-    const runs = plan.tasks.flatMap((task) => EVALUATION_VARIANTS.map((variant) => evaluationRunSpec(plan, task, variant, runSetId)));
-    return { protocolVersion: "evaluation.v2", planId, runSetId, repo: plan.repo, revision: plan.revision, promptHash: plan.promptHash, toolPolicyHash: plan.toolPolicyHash, runs };
-  }
-
   async listProjectMaps(repo?: string): Promise<ProjectMap[]> {
     const maps = await this.repository.readProjectMaps?.() ?? [];
     return repo ? maps.filter((item) => item.repo === resolve(repo)) : maps;
-  }
-
-  async recordEvaluationObservation(raw: RecordEvaluationObservationRequest): Promise<EvaluationObservation> {
-    const request = RecordEvaluationObservationRequestSchema.parse(raw);
-    const plan = (await this.repository.readEvaluationPlans?.() ?? []).find((item) => item.id === request.planId);
-    if (!plan) throw new Error(`Unknown evaluation plan: ${request.planId}`);
-    if (plan.protocolVersion !== "evaluation.v2") throw new Error("Legacy evaluation plans cannot accept integrity-bound observations");
-    const task = plan.tasks.find((item) => item.id === request.taskId);
-    if (!task) throw new Error(`Unknown evaluation task in plan ${plan.id}: ${request.taskId}`);
-    if (request.model !== plan.model || request.promptHash !== plan.promptHash || request.toolPolicyHash !== plan.toolPolicyHash) {
-      throw new Error("Evaluation observation does not match the frozen model, prompt, or tool policy");
-    }
-    const runSpec = evaluationRunSpec(plan, task, request.variant, request.runSetId);
-    if (request.runId !== runSpec.runId || request.runSpecHash !== runSpec.runSpecHash) throw new Error("Evaluation observation does not match the frozen run set and specification");
-    const requireSubset = (observed: string[], expected: string[], label: string): void => {
-      if (observed.some((id) => !expected.includes(id))) throw new Error(`${label} contains IDs not frozen in the evaluation task`);
-    };
-    requireSubset(request.coveredBoundaryIds, task.criticalBoundaryIds, "coveredBoundaryIds");
-    requireSubset(request.detectedSeededBugIds, task.seededBugIds, "detectedSeededBugIds");
-    requireSubset(request.effectiveOracleIds, task.requiredOracleIds, "effectiveOracleIds");
-    if ((task.fixtureMockCriteria.length > 0) !== (request.fixtureMockCorrect !== null)) {
-      throw new Error("fixtureMockCorrect must be recorded exactly when the frozen task defines fixture/mock criteria");
-    }
-    if (request.tokenUsage > plan.budget.maxTokens || request.toolCalls > plan.budget.maxToolCalls || request.durationMs > plan.budget.maxDurationMs) {
-      throw new Error("Evaluation observation exceeds the frozen plan budget");
-    }
-    if (new Set(request.usedTools).size !== request.usedTools.length || request.usedTools.some((tool) => !runSpec.agentInput.tools.includes(tool))) {
-      throw new Error("Evaluation observation contains duplicate or non-whitelisted tools");
-    }
-    const evidence = await this.repository.readEvidence();
-    const cited = request.evidenceIds.map((id) => evidence.find((item) => item.id === id));
-    if (cited.some((item) => !item || item.repo !== plan.repo || item.revision !== plan.revision || item.sourceType !== "execution_result")) {
-      throw new Error("Evaluation observations must cite execution evidence from the frozen repository revision");
-    }
-    const expectedOutcome = request.executionPassed ? "passed" : "failed";
-    if (!cited.some((item) => item?.payload.outcome === expectedOutcome || (!request.executionPassed && item?.payload.outcome === "error"))) {
-      throw new Error("Evaluation execution outcome must agree with at least one cited execution evidence record");
-    }
-    const bindingMatches = cited.some((item) => {
-      const binding = item?.payload.evaluation;
-      if (binding === null || typeof binding !== "object") return false;
-      const value = binding as {
-        planId?: unknown; runSetId?: unknown; taskId?: unknown; variant?: unknown; runId?: unknown; runSpecHash?: unknown;
-        model?: unknown; promptHash?: unknown; toolPolicyHash?: unknown; usedTools?: unknown;
-        tokenUsage?: unknown; toolCalls?: unknown; durationMs?: unknown; duplicateTestCount?: unknown; brittleTestCount?: unknown;
-      };
-      return value.planId === plan.id && value.runSetId === request.runSetId && value.taskId === task.id
-        && value.variant === request.variant && value.runId === request.runId && value.runSpecHash === request.runSpecHash
-        && value.model === request.model && value.promptHash === request.promptHash && value.toolPolicyHash === request.toolPolicyHash
-        && Array.isArray(value.usedTools) && value.usedTools.every((tool): tool is string => typeof tool === "string") && sameStringSet(value.usedTools, request.usedTools)
-        && value.tokenUsage === request.tokenUsage && value.toolCalls === request.toolCalls && value.durationMs === request.durationMs
-        && value.duplicateTestCount === request.duplicateTestCount && value.brittleTestCount === request.brittleTestCount;
-    });
-    if (!bindingMatches) throw new Error("Evaluation evidence must be explicitly bound to this plan, task, variant, and run");
-    const id = `evalobs_${digest(JSON.stringify({ planId: plan.id, runSetId: request.runSetId, taskId: task.id, variant: request.variant, runId: request.runId })).slice(0, 24)}`;
-    const previousObservations = await this.repository.readEvaluationObservations?.() ?? [];
-    const previous = previousObservations.find((item) => item.id === id);
-    if (previous) {
-      const previousRequest = RecordEvaluationObservationRequestSchema.parse(previous);
-      if (JSON.stringify(previousRequest) === JSON.stringify(request)) return previous;
-      throw new Error("An observation for this run already exists and is immutable; use a new runSetId to rerun");
-    }
-    const recordedAt = isoNow();
-    const observation: EvaluationObservation = { ...request, id, recordedAt };
-    if (!this.repository.appendEvaluationObservation) throw new Error("Evaluation observation storage is not configured");
-    await this.repository.appendEvaluationObservation(observation);
-    return observation;
-  }
-
-  async listEvaluationObservations(planId?: string, runSetId?: string): Promise<EvaluationObservation[]> {
-    const observations = await this.repository.readEvaluationObservations?.() ?? [];
-    return observations.filter((item) => (!planId || item.planId === planId) && (!runSetId || item.runSetId === runSetId));
-  }
-
-  async evaluationReport(planId: string, rawRunSetId = ""): Promise<EvaluationReport> {
-    const plan = (await this.repository.readEvaluationPlans?.() ?? []).find((item) => item.id === planId);
-    if (!plan) throw new Error(`Unknown evaluation plan: ${planId}`);
-    const all = (await this.repository.readEvaluationObservations?.() ?? []).filter((item) => item.planId === planId);
-    const availableRunSetIds = [...new Set(all.map((item) => item.runSetId))].sort();
-    const requestedRunSetId = rawRunSetId.trim() ? EvaluationRunSetIdSchema.parse(rawRunSetId) : "";
-    const runSetId = plan.protocolVersion === "evaluation.v2"
-      ? requestedRunSetId || (availableRunSetIds.length === 1 ? availableRunSetIds[0]! : null)
-      : null;
-    const scoped = plan.protocolVersion === "evaluation.v2" ? (runSetId ? all.filter((item) => item.runSetId === runSetId) : []) : all;
-    const latest = new Map<string, EvaluationObservation>();
-    for (const observation of scoped) {
-      const key = `${observation.taskId}:${observation.variant}`;
-      const previous = latest.get(key);
-      if (!previous || previous.recordedAt < observation.recordedAt) latest.set(key, observation);
-    }
-    const completeTasks = plan.tasks.filter((task) => EVALUATION_VARIANTS.every((variant) => latest.has(`${task.id}:${variant}`)));
-    const rowsByVariant = Object.fromEntries(EVALUATION_VARIANTS.map((variant) => [
-      variant,
-      completeTasks.map((task) => ({ task, observation: latest.get(`${task.id}:${variant}`)! })),
-    ])) as Record<EvaluationVariant, Array<{ task: EvaluationTask; observation: EvaluationObservation }>>;
-    const variants = Object.fromEntries(EVALUATION_VARIANTS.map((variant) => [variant, evaluationSummary(rowsByVariant[variant])])) as Record<EvaluationVariant, EvaluationVariantSummary>;
-    let taskWins = 0;
-    let taskLosses = 0;
-    for (const task of completeTasks) {
-      const baseline = taskQuality(task, latest.get(`${task.id}:B_codegraph`)!);
-      const candidate = taskQuality(task, latest.get(`${task.id}:C_codegraph_testknowledge`)!);
-      if (candidate > baseline + 1e-9) taskWins += 1;
-      else if (candidate < baseline - 1e-9) taskLosses += 1;
-    }
-    const baseline = variants.B_codegraph;
-    const candidate = variants.C_codegraph_testknowledge;
-    const deltaCvsB = {
-      boundaryCoverageRate: candidate.boundaryCoverageRate - baseline.boundaryCoverageRate,
-      seededBugDetectionRate: candidate.seededBugDetectionRate - baseline.seededBugDetectionRate,
-      effectiveOracleRate: candidate.effectiveOracleRate - baseline.effectiveOracleRate,
-      fixtureMockCorrectRate: candidate.fixtureMockCorrectRate === null || baseline.fixtureMockCorrectRate === null ? null : candidate.fixtureMockCorrectRate - baseline.fixtureMockCorrectRate,
-      executionPassRate: candidate.executionPassRate - baseline.executionPassRate,
-      invalidAssertionCount: candidate.invalidAssertionCount - baseline.invalidAssertionCount,
-      duplicateTestCount: candidate.duplicateTestCount - baseline.duplicateTestCount,
-      brittleTestCount: candidate.brittleTestCount - baseline.brittleTestCount,
-      tokenIncreaseRatio: increaseRatio(candidate.averageTokens, baseline.averageTokens),
-      toolCallIncreaseRatio: increaseRatio(candidate.averageToolCalls, baseline.averageToolCalls),
-      durationIncreaseRatio: increaseRatio(candidate.averageDurationMs, baseline.averageDurationMs),
-    };
-    const reasons: string[] = [];
-    if (plan.protocolVersion !== "evaluation.v2") reasons.push("legacy_evaluation_protocol_without_run_spec_integrity");
-    if (plan.protocolVersion === "evaluation.v2" && !runSetId && availableRunSetIds.length > 1) reasons.push("run_set_selection_required");
-    if (completeTasks.length < plan.acceptance.minimumCompleteTasks) reasons.push("complete_task_count_below_threshold");
-    const winRate = completeTasks.length === 0 ? 0 : taskWins / completeTasks.length;
-    const lossRate = completeTasks.length === 0 ? 0 : taskLosses / completeTasks.length;
-    if (winRate < plan.acceptance.minimumTaskWinRate) reasons.push("task_win_rate_below_threshold");
-    if (lossRate > plan.acceptance.maximumTaskLossRate) reasons.push("task_loss_rate_above_threshold");
-    if (deltaCvsB.executionPassRate < 0) reasons.push("execution_pass_rate_regressed");
-    if (deltaCvsB.boundaryCoverageRate < 0) reasons.push("boundary_coverage_regressed");
-    if (deltaCvsB.seededBugDetectionRate < 0) reasons.push("seeded_bug_detection_regressed");
-    if (deltaCvsB.effectiveOracleRate < 0) reasons.push("effective_oracle_rate_regressed");
-    if ((deltaCvsB.fixtureMockCorrectRate ?? 0) < 0) reasons.push("fixture_mock_correctness_regressed");
-    if (deltaCvsB.invalidAssertionCount > 0) reasons.push("invalid_assertions_increased");
-    if (deltaCvsB.duplicateTestCount > 0) reasons.push("duplicate_tests_increased");
-    if (deltaCvsB.brittleTestCount > 0) reasons.push("brittle_tests_increased");
-    if (deltaCvsB.tokenIncreaseRatio > plan.acceptance.maximumTokenIncreaseRatio) reasons.push("token_cost_above_threshold");
-    if (deltaCvsB.toolCallIncreaseRatio > plan.acceptance.maximumToolCallIncreaseRatio) reasons.push("tool_calls_above_threshold");
-    if (deltaCvsB.durationIncreaseRatio > plan.acceptance.maximumDurationIncreaseRatio) reasons.push("duration_above_threshold");
-    const behaviorImproved = deltaCvsB.boundaryCoverageRate > 0 || deltaCvsB.seededBugDetectionRate > 0 || deltaCvsB.effectiveOracleRate > 0 || (deltaCvsB.fixtureMockCorrectRate ?? 0) > 0
-      || deltaCvsB.invalidAssertionCount < 0 || deltaCvsB.duplicateTestCount < 0 || deltaCvsB.brittleTestCount < 0;
-    if (!behaviorImproved) reasons.push("no_behavior_metric_improved");
-    const verdict = plan.protocolVersion !== "evaluation.v2" || completeTasks.length < plan.acceptance.minimumCompleteTasks ? "insufficient_data" : reasons.length === 0 ? "improved" : "not_demonstrated";
-    return { planId, runSetId, availableRunSetIds, completeTaskCount: completeTasks.length, taskWins, taskLosses, taskTies: completeTasks.length - taskWins - taskLosses, variants, deltaCvsB, verdict, reasons };
   }
 
   async review(id: string, raw: ReviewRequest): Promise<KnowledgeCard> {
@@ -1844,33 +1576,12 @@ export class KnowledgeEngine {
   async recordFeedback(raw: FeedbackRequest): Promise<Evidence> {
     const parsed = FeedbackRequestSchema.parse(raw);
     const request = { ...parsed, repo: resolve(parsed.repo) };
-    if (request.evaluation) {
-      const plan = (await this.repository.readEvaluationPlans?.() ?? []).find((item) => item.id === request.evaluation!.planId);
-      const task = plan?.tasks.find((item) => item.id === request.evaluation!.taskId);
-      if (!plan || !task || plan.protocolVersion !== "evaluation.v2" || plan.repo !== request.repo || plan.revision !== request.revision) {
-        throw new Error("Evaluation feedback must reference a v2 plan task from the same repository revision");
-      }
-      const runSpec = evaluationRunSpec(plan, task, request.evaluation.variant, request.evaluation.runSetId);
-      if (request.evaluation.runId !== runSpec.runId || request.evaluation.runSpecHash !== runSpec.runSpecHash) throw new Error("Evaluation feedback does not match the frozen run set and specification");
-      if (request.evaluation.model !== plan.model || request.evaluation.promptHash !== plan.promptHash || request.evaluation.toolPolicyHash !== plan.toolPolicyHash) {
-        throw new Error("Evaluation feedback does not match the frozen model, prompt, or tool policy");
-      }
-      if (new Set(request.evaluation.usedTools).size !== request.evaluation.usedTools.length || request.evaluation.usedTools.some((tool) => !runSpec.agentInput.tools.includes(tool))) {
-        throw new Error("Evaluation feedback contains duplicate or non-whitelisted tools");
-      }
-      if (request.evaluation.tokenUsage > plan.budget.maxTokens || request.evaluation.toolCalls > plan.budget.maxToolCalls || request.evaluation.durationMs > plan.budget.maxDurationMs) {
-        throw new Error("Evaluation feedback exceeds the frozen plan budget");
-      }
-      if (request.execution?.durationMs !== null && request.execution?.durationMs !== undefined && request.execution.durationMs !== request.evaluation.durationMs) {
-        throw new Error("Evaluation feedback duration must match execution details");
-      }
-    }
     const cards = await this.repository.readKnowledge();
     const current = request.knowledgeId ? cards.find((card) => card.id === request.knowledgeId) : undefined;
     if (request.knowledgeId && (!current || current.repo !== request.repo || current.revision !== request.revision)) {
       throw new Error("Feedback knowledgeId must reference an existing card from the same repository revision");
     }
-    const content = JSON.stringify({ command: request.command, outcome: request.outcome, observed: request.observed, execution: request.execution ?? null, evaluation: request.evaluation ?? null, oracleAssessment: request.oracleAssessment ?? null });
+    const content = JSON.stringify({ command: request.command, outcome: request.outcome, observed: request.observed, execution: request.execution ?? null, oracleAssessment: request.oracleAssessment ?? null });
     const contentHash = digest(content);
     const evidence: Evidence = {
       id: `ev_${digest(`${request.repo}:${request.revision}:${request.sourceRef}:${contentHash}`).slice(0, 24)}`,
@@ -1887,7 +1598,7 @@ export class KnowledgeEngine {
       extractor: "feedback.external-execution.v2",
       content: request.observed,
       confidence: request.confidence,
-      payload: { command: request.command, outcome: request.outcome, observed: request.observed, knowledgeId: request.knowledgeId ?? null, execution: request.execution ?? null, evaluation: request.evaluation ?? null, oracleAssessment: request.oracleAssessment ?? null },
+      payload: { command: request.command, outcome: request.outcome, observed: request.observed, knowledgeId: request.knowledgeId ?? null, execution: request.execution ?? null, oracleAssessment: request.oracleAssessment ?? null },
     };
     const shouldInvalidate = request.oracleAssessment?.verdict === "contradicted" && current !== undefined && (current.status === "reviewed" || current.status === "verified");
     const next = shouldInvalidate

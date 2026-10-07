@@ -5,13 +5,10 @@ import {
   BuildRequestSchema,
   ConflictRequestSchema,
   ContextRequestSchema,
-  CreateEvaluationPlanRequestSchema,
   CreateKnowledgeBatchRequestSchema,
   CreateKnowledgeRequestSchema,
-  EvaluationRunSetIdSchema,
   FeedbackRequestSchema,
   MergeKnowledgeRequestSchema,
-  RecordEvaluationObservationRequestSchema,
   ResolveConflictRequestSchema,
   ReviewRequestSchema,
   RollbackKnowledgeRequestSchema,
@@ -34,7 +31,7 @@ const scanner = new MultiFrameworkProjectScanner();
 const server = new McpServer(
   { name: "testknowledge", version: "0.1.0" },
   {
-    instructions: "Call get_test_context first for test-design tasks. Treat candidate and stale cards as unverified; use evidence links and abstentions. build_test_knowledge performs static extraction only and never runs tests. Review and verification are separate: verify only with successful external execution evidence bound to the same repository. Human merges preserve all source evidence and restart at candidate; rollback also restarts at candidate. Evaluation tools freeze A/B/C conditions and import explicitly bound external execution evidence; they never execute tests. For v2 evaluation manifests, pass only each run's agentInput to the evaluated agent, keep scoring private to the evaluator, and preserve runSetId, runId, and runSpecHash when recording feedback and observations. Reports compare one run set at a time.",
+    instructions: "Call get_test_context first for test-design tasks. Treat candidate and stale cards as unverified; use evidence links and abstentions. build_test_knowledge performs static extraction only and never runs tests. Review and verification are separate: verify only with successful external execution evidence bound to the same repository. Human merges preserve all source evidence and restart at candidate; rollback also restarts at candidate.",
   },
 );
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -139,40 +136,6 @@ server.registerTool("rollback_test_knowledge", {
   inputSchema: z.object({ id: z.string().min(1), rollback: RollbackKnowledgeRequestSchema }),
   annotations: writesLocal,
 }, async ({ id, rollback }) => result(await serializeWrite(() => engine.rollbackKnowledge(id, rollback))));
-
-server.registerTool("create_test_knowledge_evaluation", {
-  title: "Freeze an A/B/C evaluation plan",
-  description: "Freeze repository revision, model, prompt, tools, budgets, tasks, and acceptance thresholds. Does not execute tests.",
-  inputSchema: CreateEvaluationPlanRequestSchema,
-  annotations: writesLocal,
-}, async (input) => result(await serializeWrite(() => engine.createEvaluationPlan(input))));
-
-server.registerTool("list_test_knowledge_evaluations", {
-  title: "List frozen A/B/C evaluation plans",
-  inputSchema: z.object({}),
-  annotations: readOnly,
-}, async () => result(await engine.listEvaluationPlans()));
-
-server.registerTool("get_test_knowledge_evaluation_manifest", {
-  title: "Create an integrity-bound A/B/C run manifest",
-  description: "Expand one v2 frozen plan into task and variant run specifications without executing tests. Pass only agentInput to evaluated agents and keep scoring private to the evaluator.",
-  inputSchema: z.object({ planId: z.string().min(1), runSetId: EvaluationRunSetIdSchema }),
-  annotations: readOnly,
-}, async ({ planId, runSetId }) => result(await engine.evaluationRunManifest(planId, runSetId)));
-
-server.registerTool("record_test_knowledge_evaluation", {
-  title: "Record one evidence-backed evaluation observation",
-  description: "Import externally executed quality and cost observations that match a frozen plan.",
-  inputSchema: RecordEvaluationObservationRequestSchema,
-  annotations: writesLocal,
-}, async (input) => result(await serializeWrite(() => engine.recordEvaluationObservation(input))));
-
-server.registerTool("get_test_knowledge_evaluation_report", {
-  title: "Compare A/B/C evaluation results",
-  description: "Compare observations from exactly one run set. Specify runSetId when a plan has multiple recorded run sets.",
-  inputSchema: z.object({ planId: z.string().min(1), runSetId: EvaluationRunSetIdSchema.optional() }),
-  annotations: readOnly,
-}, async ({ planId, runSetId }) => result(await engine.evaluationReport(planId, runSetId)));
 
 server.registerTool("record_test_feedback", {
   title: "Record external test execution evidence",

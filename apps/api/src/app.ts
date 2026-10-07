@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { BuildRequestSchema, ConflictRequestSchema, ContextRequestSchema, CreateEvaluationPlanRequestSchema, CreateKnowledgeBatchRequestSchema, CreateKnowledgeRequestSchema, FeedbackRequestSchema, KnowledgeStatusSchema, MergeKnowledgeRequestSchema, RecordEvaluationObservationRequestSchema, ResolveConflictRequestSchema, ReviewRequestSchema, RollbackKnowledgeRequestSchema, SettingsPatchSchema, VerificationRequestSchema } from "@testknowledge/model";
+import { BuildRequestSchema, ConflictRequestSchema, ContextRequestSchema, CreateKnowledgeBatchRequestSchema, CreateKnowledgeRequestSchema, FeedbackRequestSchema, KnowledgeStatusSchema, MergeKnowledgeRequestSchema, ResolveConflictRequestSchema, ReviewRequestSchema, RollbackKnowledgeRequestSchema, SettingsPatchSchema, VerificationRequestSchema } from "@testknowledge/model";
 import { KnowledgeEngine } from "@testknowledge/core";
 import { SettingsStore, createDefaultEngine, MultiFrameworkProjectScanner, resolveDataRoot, settingsFilePath } from "@testknowledge/adapters";
 
@@ -23,45 +23,7 @@ export function createApp(engine?: KnowledgeEngine, settings?: SettingsStore): F
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Settings update failed" });
     }
   });
-  app.get("/api/evaluations", async () => instance.listEvaluationPlans());
-  app.get<{ Params: { id: string }; Querystring: { runSetId?: string } }>("/api/evaluations/:id/manifest", async (request, reply) => {
-    try {
-      return await instance.evaluationRunManifest(request.params.id, request.query.runSetId ?? "");
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "Evaluation manifest creation failed" });
-    }
-  });
   app.get<{ Querystring: { repo?: string } }>("/api/project-maps", async (request) => instance.listProjectMaps(request.query.repo));
-  app.get<{ Querystring: { planId?: string; runSetId?: string } }>("/api/evaluation-observations", async (request) => instance.listEvaluationObservations(request.query.planId, request.query.runSetId));
-  app.get<{ Params: { id: string }; Querystring: { runSetId?: string } }>("/api/evaluations/:id/report", async (request, reply) => {
-    try {
-      return await instance.evaluationReport(request.params.id, request.query.runSetId ?? "");
-    } catch (error) {
-      return reply.code(404).send({ error: error instanceof Error ? error.message : "Unknown evaluation plan" });
-    }
-  });
-  app.post("/api/evaluations", async (request, reply) => {
-    if (writing) return reply.code(409).send({ error: "构建或审核正在进行，请完成后重试。" });
-    writing = true;
-    try {
-      return await instance.createEvaluationPlan(CreateEvaluationPlanRequestSchema.parse(request.body));
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "Evaluation plan creation failed" });
-    } finally {
-      writing = false;
-    }
-  });
-  app.post("/api/evaluation-observations", async (request, reply) => {
-    if (writing) return reply.code(409).send({ error: "构建或审核正在进行，请完成后重试。" });
-    writing = true;
-    try {
-      return await instance.recordEvaluationObservation(RecordEvaluationObservationRequestSchema.parse(request.body));
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "Evaluation observation failed" });
-    } finally {
-      writing = false;
-    }
-  });
   app.get("/api/knowledge", async () => instance.listKnowledge());
   app.get<{ Querystring: { repo?: string; status?: string; offset?: string; limit?: string } }>("/api/knowledge/page", async (request, reply) => {
     const status = request.query.status === "active"

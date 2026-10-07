@@ -10,7 +10,6 @@ const text = (value: unknown): string => typeof value === "string" ? value.trim(
 const strings = (value: unknown): string[] => Array.isArray(value)
   ? value.flatMap((item) => typeof item === "string" ? [item] : isRecord(item) && typeof item.name === "string" ? [item.name] : [])
   : [];
-const evaluationVariants = new Set(["A_ordinary_agent", "B_codegraph", "C_codegraph_testknowledge"]);
 
 const number = (...values: unknown[]): number | null => {
   const value = values.find((item) => typeof item === "number" && Number.isFinite(item));
@@ -61,30 +60,6 @@ function executionDetails(item: JsonRecord): ExecutionDetails {
     } : null,
     failures,
   });
-}
-
-function evaluationBinding(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const planId = text(value.planId);
-  const runSetId = text(value.runSetId);
-  const taskId = text(value.taskId);
-  const variant = text(value.variant);
-  const runId = text(value.runId);
-  const runSpecHash = text(value.runSpecHash);
-  const model = text(value.model);
-  const promptHash = text(value.promptHash);
-  const toolPolicyHash = text(value.toolPolicyHash);
-  const usedTools = strings(value.usedTools);
-  const tokenUsage = integer(value.tokenUsage);
-  const toolCalls = integer(value.toolCalls);
-  const durationMs = integer(value.durationMs);
-  const duplicateTestCount = integer(value.duplicateTestCount);
-  const brittleTestCount = integer(value.brittleTestCount);
-  return planId && runSetId && taskId && runId && runSpecHash && model && promptHash && toolPolicyHash
-    && tokenUsage !== null && toolCalls !== null && durationMs !== null && duplicateTestCount !== null && brittleTestCount !== null
-    && evaluationVariants.has(variant)
-    ? { planId, runSetId, taskId, variant, runId, runSpecHash, model, promptHash, toolPolicyHash, usedTools, tokenUsage, toolCalls, durationMs, duplicateTestCount, brittleTestCount }
-    : null;
 }
 
 function records(raw: string): JsonRecord[] {
@@ -159,17 +134,16 @@ export class ExternalArtifactAdapter implements SourceAdapter {
       const outcome = item.outcome;
       const command = strings(item.command);
       const observed = text(item.observed) || text(item.summary);
-      const evaluation = evaluationBinding(item.evaluation);
       if ((outcome !== "passed" && outcome !== "failed" && outcome !== "error") || command.length === 0 || !observed) return [];
       const sourceRef = text(item.sourceRef) || text(item.url) || `${file.path}#${index + 1}`;
       const execution = executionDetails(item);
-      const content = JSON.stringify({ command, outcome, observed, execution, evaluation });
+      const content = JSON.stringify({ command, outcome, observed, execution });
       const contentHash = hash(content);
       return [{
         id: evidenceId(scope.repo, sourceRef, contentHash), sourceType: "execution_result" as const, sourceRef,
         repo: scope.repo, revision: scope.revision, path: file.path, symbol: "", lineStart: 1, lineEnd: 1,
         contentHash, extractedAt: new Date().toISOString(), extractor: this.id, content, confidence: 0.8,
-        payload: { command, outcome, observed, knowledgeId: null, imported: true, execution, evaluation },
+        payload: { command, outcome, observed, knowledgeId: null, imported: true, execution },
       }];
     });
   }
