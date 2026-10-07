@@ -174,12 +174,3 @@ packages/
 
 主要文件包括 `evidence.jsonl`、`knowledge.jsonl`、`relations.jsonl`、`project-maps.jsonl`，以及审核、分组、知识变更和抽取运行记录。`settings.json` 保存模型配置与凭据，`llm-cache/` 保存模型响应缓存，`index.sqlite3` 为派生索引。CLI、API 与 MCP 应指向同一数据目录以共享知识。
 
-## 进一步阅读
-
-- [架构设计](docs/architecture.md) · 模块职责、数据模型与治理规则
-- [项目架构图](docs/项目架构图.md) · 管线与依赖关系
-- [Agent 接入](docs/agent-integration.md) · 客户端配置与调用约定
-- [QQBot 阶段一试点](docs/pilot-qqbot.md) · 试点过程与证据边界
-- [QQBot 候选知识包](examples/qqbot-pilot-knowledge.json) · 与试点 Evidence 绑定的导入示例，使用前需匹配仓库修订
-- [交付说明](docs/交付说明.md) · 使用与交付背景
-- [完成度审计](docs/completion-audit.md) · 规划对照、已有证据与待验证事项
